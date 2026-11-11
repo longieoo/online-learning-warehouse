@@ -51,5 +51,6 @@ docker compose --profile demo up -d --wait dashboard
 
 `scripts/verify.ps1` tạo project Docker riêng, sinh 5.000 ghi danh, chạy toàn luồng, unit/integration và các tình huống lỗi. Project kiểm thử dùng cổng khác và `DW_MIN_SOURCE_ROWS=0`. Đây là smoke test, không thay thế nghiệm thu hơn 5 triệu dòng. Test lỗi có quyền ghi/xóa dữ liệu giả lập và chỉ chạy khi `DW_ALLOW_SCENARIOS=1`.
 
-Bằng chứng nghiệm thu có ngày, scope và đường dẫn ở `artifacts/acceptance.json`. Các số đo v2 ngày 04/11/2026 nằm trong history, không phải số đo mới. Gói bàn giao có MANIFEST.json với SHA-256 cho từng file. Không chứa .env, cache, database volume hoặc zip lồng nhau. Công cụ tạo gói được giữ trong workspace gốc.
+Bằng chứng được lưu có chọn lọc tại `docs/verification/`. Các artifacts runtime được tạo lại khi chạy dự án. Các số đo v2 ngày 04/11/2026 nằm trong history, không phải số đo mới. Gói bàn giao có MANIFEST.json với SHA-256 cho từng file. Không chứa .env, cache, database volume hoặc zip lồng nhau. Công cụ tạo gói được giữ trong workspace gốc.
+
 
