@@ -7,6 +7,7 @@ jobs:
     env:
       COMPOSE_PROJECT_NAME: learning-dw-ci
       DW_MIN_SOURCE_ROWS: 0
+      DW_CPUS: 2
     steps:
       - uses: actions/checkout@v4
       - run: docker compose build runner dashboard
@@ -17,3 +18,4 @@ jobs:
       - run: docker compose run --rm dashboard python -m tests.dashboard_check
       - if: always()
         run: docker compose logs --tail 80
+

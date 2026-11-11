@@ -1,3 +1,4 @@
+import os
 import csv
 import hashlib
 import json
@@ -254,8 +255,8 @@ def benchmark(runs=5, reuse_mirror=False):
             python_version=platform.python_version(),
             postgres_settings=pg_settings,
             resources=dict(
-                postgres_cpu=4,
-                clickhouse_cpu=4,
+                postgres_cpu=int(os.getenv("DW_CPUS","4")),
+                clickhouse_cpu=int(os.getenv("DW_CPUS","4")),
                 postgres_memory="2 GiB",
                 clickhouse_memory="3 GiB",
                 runner_memory="1500 MiB",
@@ -315,3 +316,4 @@ def benchmark(runs=5, reuse_mirror=False):
     finally:
         ch.close()
         pg.close()
+

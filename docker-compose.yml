@@ -11,7 +11,7 @@ services:
     volumes: ["postgres_data:/var/lib/postgresql/data", "./docker/init-databases.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro"]
     shm_size: 256mb
     mem_limit: 2g
-    cpus: 4
+    cpus: ${DW_CPUS:-4}
     command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=32MB", "-c", "max_parallel_workers_per_gather=3"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U learning -d learning_oltp"]
@@ -28,7 +28,7 @@ services:
     ports: ["127.0.0.1:${CH_PORT:-58123}:8123"]
     volumes: ["clickhouse_data:/var/lib/clickhouse", "./docker/clickhouse.xml:/etc/clickhouse-server/config.d/resources.xml:ro"]
     mem_limit: 3g
-    cpus: 4
+    cpus: ${DW_CPUS:-4}
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     healthcheck:
@@ -55,11 +55,12 @@ services:
       CH_USER: learning
       CH_PASSWORD: ${CH_PASSWORD:-local_learning_demo}
       PYTHONUNBUFFERED: 1
+      DW_CPUS: ${DW_CPUS:-4}
       DW_MIN_SOURCE_ROWS: ${DW_MIN_SOURCE_ROWS:-5000000}
       DW_ARTIFACTS_DIR: ${DW_ARTIFACTS_DIR:-/app/artifacts}
       TZ: UTC
     mem_limit: 1500m
-    cpus: 4
+    cpus: ${DW_CPUS:-4}
     depends_on:
       postgres: {condition: service_healthy}
       clickhouse: {condition: service_healthy}
@@ -98,6 +99,7 @@ services:
 volumes:
   postgres_data:
   clickhouse_data:
+
 
 
 
