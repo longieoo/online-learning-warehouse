@@ -1,0 +1,12 @@
+.env
+artifacts
+__pycache__
+**/__pycache__
+.git
+.ruff_cache
+docs/history
+*.zip
+plan.md
+implement.md
+quy_trinh_tao_data_warehouse.md
+tong_hop_thuat_ngu.md

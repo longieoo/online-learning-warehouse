@@ -1,0 +1,8 @@
+<clickhouse>
+  <max_server_memory_usage>2600000000</max_server_memory_usage>
+  <background_pool_size>8</background_pool_size>
+  <background_merges_mutations_concurrency_ratio>4</background_merges_mutations_concurrency_ratio>
+  <mark_cache_size>134217728</mark_cache_size>
+  <uncompressed_cache_size>0</uncompressed_cache_size>
+  <logger><level>warning</level><console>true</console></logger>
+</clickhouse>

@@ -1,0 +1,19 @@
+name: warehouse-smoke
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: learning-dw-ci
+      DW_MIN_SOURCE_ROWS: 0
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build runner dashboard
+      - run: docker compose up -d --wait postgres clickhouse
+      - run: docker compose run --rm runner python cli.py all --enrollments 5000 --runs 3
+      - run: docker compose run --rm runner python -m unittest discover -s tests -v
+      - run: docker compose run --rm -e DW_ALLOW_SCENARIOS=1 runner python -m tests.scenarios
+      - run: docker compose run --rm dashboard python -m tests.dashboard_check
+      - if: always()
+        run: docker compose logs --tail 80

@@ -1,0 +1,105 @@
+name: ${COMPOSE_PROJECT_NAME:-online-learning-dw}
+services:
+  postgres:
+    image: postgres:16.6-bookworm
+    environment:
+      POSTGRES_DB: learning_oltp
+      POSTGRES_USER: learning
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-local_learning_demo}
+      TZ: UTC
+    ports: ["127.0.0.1:${PG_PORT:-55432}:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data", "./docker/init-databases.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro"]
+    shm_size: 256mb
+    mem_limit: 2g
+    cpus: 4
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=32MB", "-c", "max_parallel_workers_per_gather=3"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U learning -d learning_oltp"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    environment:
+      CLICKHOUSE_USER: learning
+      CLICKHOUSE_PASSWORD: ${CH_PASSWORD:-local_learning_demo}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      TZ: UTC
+    ports: ["127.0.0.1:${CH_PORT:-58123}:8123"]
+    volumes: ["clickhouse_data:/var/lib/clickhouse", "./docker/clickhouse.xml:/etc/clickhouse-server/config.d/resources.xml:ro"]
+    mem_limit: 3g
+    cpus: 4
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user learning --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  runner:
+    image: online-learning-dw-v3-runner:local
+    build:
+      context: .
+      target: runner
+    profiles: ["tools"]
+    working_dir: /app
+    volumes: [".:/app"]
+    environment: &runner_env
+      PGHOST: postgres
+      PGDATABASE: learning_oltp
+      PG_READER_PASSWORD: ${PG_READER_PASSWORD:-local_reader_demo}
+      PG_STAGE_PASSWORD: ${PG_STAGE_PASSWORD:-local_staging_demo}
+      PGUSER: learning
+      PGPASSWORD: ${PG_PASSWORD:-local_learning_demo}
+      CH_HOST: clickhouse
+      CH_USER: learning
+      CH_PASSWORD: ${CH_PASSWORD:-local_learning_demo}
+      PYTHONUNBUFFERED: 1
+      DW_MIN_SOURCE_ROWS: ${DW_MIN_SOURCE_ROWS:-5000000}
+      DW_ARTIFACTS_DIR: ${DW_ARTIFACTS_DIR:-/app/artifacts}
+      TZ: UTC
+    mem_limit: 1500m
+    cpus: 4
+    depends_on:
+      postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    command: ["python", "cli.py", "--help"]
+  dashboard:
+    image: online-learning-dw-v3-dashboard:local
+    build:
+      context: .
+      target: dashboard
+    profiles: ["demo"]
+    working_dir: /app
+    volumes: [".:/app"]
+    environment:
+      PGHOST: postgres
+      PGUSER: learning
+      PG_READER_PASSWORD: ${PG_READER_PASSWORD:-local_reader_demo}
+      PG_STAGE_PASSWORD: ${PG_STAGE_PASSWORD:-local_staging_demo}
+      CH_HOST: clickhouse
+      CH_USER: learning
+      CH_PASSWORD: ${CH_PASSWORD:-local_learning_demo}
+      DW_MIN_SOURCE_ROWS: ${DW_MIN_SOURCE_ROWS:-5000000}
+      PYTHONPATH: /app
+      DW_ARTIFACTS_DIR: ${DW_ARTIFACTS_DIR:-/app/artifacts}
+    ports: ["127.0.0.1:${DASHBOARD_PORT:-8501}:8501"]
+    mem_limit: 1500m
+    cpus: 2
+    depends_on:
+      postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    command: ["streamlit", "run", "demo/app.py", "--server.address=0.0.0.0", "--server.headless=true"]
+volumes:
+  postgres_data:
+  clickhouse_data:
+
+
+
+
+
