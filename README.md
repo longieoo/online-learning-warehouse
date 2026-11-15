@@ -53,6 +53,8 @@ For a smaller first run, choose the following command **instead of** the default
 docker compose run --rm -e DW_MIN_SOURCE_ROWS=0 runner python cli.py all --enrollments 5000 --runs 3
 ```
 
+For subsequent pipeline runs on this small fixture, also set `DW_MIN_SOURCE_ROWS=0` in `.env`. The default five-million-row guard is intended for the full dataset and otherwise rejects a later small-fixture load.
+
 Copy [.env.example](.env.example) to `.env` before creating volumes to customize ports, credentials or CPU/memory limits. Default passwords are local-demo credentials. Host ports bind only to loopback. See [security](SECURITY.md) before considering any network deployment.
 
 ## Update data and inspect results

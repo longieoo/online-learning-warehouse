@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import stat
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -78,6 +80,12 @@ class BenchmarkEvidenceTests(unittest.TestCase):
                 archived = parent / pointer["directory"] / name
                 self.assertEqual(archived.read_bytes(), data)
                 self.assertEqual(pointer["sha256"][name], hashlib.sha256(data).hexdigest())
+                self.assertEqual((parent / name).read_bytes(), data)
+                if os.name == "posix":
+                    self.assertEqual(stat.S_IMODE(archived.stat().st_mode), 0o644)
+                    self.assertEqual(stat.S_IMODE((parent / name).stat().st_mode), 0o644)
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE((parent / "latest.json").stat().st_mode), 0o644)
             with self.assertRaises(FileExistsError):
                 publish_bundle(parent, "a" * 32, files)
 

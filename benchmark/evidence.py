@@ -104,6 +104,9 @@ def atomic_bytes(path, data):
         with os.fdopen(fd, "wb") as output:
             output.write(data)
             output.flush()
+            # Evidence written by container root must remain readable by the host runner.
+            if os.name == "posix":
+                os.fchmod(output.fileno(), 0o644)
             os.fsync(output.fileno())
         os.replace(temporary, path)
     finally:
