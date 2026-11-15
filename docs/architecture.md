@@ -1,50 +1,80 @@
-# Kiến trúc hiện hành · v3
+# Architecture
 
-## Ranh giới dữ liệu
+The warehouse turns synthetic online-learning transactions into historical, reconciled analytical data. It runs on one Docker host and deliberately uses a small stack: PostgreSQL, Python, ClickHouse and Streamlit.
 
-| Thành phần | Nơi lưu | Vai trò |
+## Data boundaries
+
+| Layer | Location | Responsibility |
 |---|---|---|
-| OLTP, lịch sử người dùng, change journal | PostgreSQL `learning_oltp.oltp` | Nguồn tác nghiệp, trigger ghi revision và nhật ký cùng transaction |
-| Silver | PostgreSQL `dwh_staging.silver` | Bản sạch, PK theo khóa nguồn, upsert |
-| Quarantine | PostgreSQL `dwh_staging.quarantine` | Payload lỗi, mã lỗi, thời điểm và trạng thái đã sửa |
-| Control state | PostgreSQL `dwh_staging.staging` | Checkpoint, revision, delta chờ, manifest, kế hoạch công bố |
-| Gold ứng viên | ClickHouse `gold_build` | Dựng, kiểm tra, đối soát trước khi phục vụ |
-| Gold phục vụ | ClickHouse `gold` | 4 fact, 7 dimension, 2 bảng tổng hợp và 2 materialized-view feed |
-| Bridge tạm | ClickHouse `stage_bridge` | PostgreSQL table engine đọc Silver, xóa sau khi dùng |
-| Benchmark mirror | PostgreSQL `dwh_staging.benchmark` | Bản sao nguyên Gold để kiểm tra equality và đo truy vấn |
+| Operational source | PostgreSQL `learning_oltp.oltp` | Business records, learner history and transactional change journal |
+| Silver | PostgreSQL `dwh_staging.silver` | Validated current source rows, keyed by source identifiers |
+| Quarantine | PostgreSQL `dwh_staging.quarantine` | Rejected payloads, reasons and resolution state |
+| Control | PostgreSQL `dwh_staging.staging` | Transaction checkpoints, source revisions, pending changes, runs and publication plans |
+| Candidate warehouse | ClickHouse `gold_build` | Build and validate a complete candidate before publication |
+| Serving warehouse | ClickHouse `gold` | Four facts, seven dimensions, two summary tables and their view feeds |
+| Temporary bridge | ClickHouse `stage_bridge` | PostgreSQL table engines reading Silver; removed after use |
+| Comparison mirror | PostgreSQL `dwh_staging.benchmark` | Same Gold rows and columns for cross-engine parity and timing |
 
-Không lưu bản sao Bronze riêng trong ClickHouse. Dữ liệu gốc nằm ở OLTP và payload journal. ETL không ghi vào OLTP. `setup`, generator và script demo sử dụng tài khoản quản trị nguồn, tách với reader của ETL.
+Source and staging are separate databases on the same PostgreSQL service. There is no extra ClickHouse Bronze copy. Original business data remains in OLTP and original change payloads are retained in the source journal or quarantine. The ETL source connection is read-only; initialization and synthetic fixture generation use a separate administrative connection.
 
-## Grain và bus matrix
+```mermaid
+flowchart LR
+  S[(PostgreSQL OLTP)] --> J[Transactional journal]
+  S --> E[Python extraction and validation]
+  J --> E
+  E --> Q[(Quarantine)]
+  E --> V[(PostgreSQL Silver)]
+  V --> C[ClickHouse candidate]
+  C --> G{Quality gate}
+  G -->|pass| P[Recoverable publication]
+  G -->|fail| K[Keep published version]
+  P --> W[(ClickHouse Gold)]
+  W --> D[Read-only dashboard]
+  W --> R[SQL and CSV reports]
+```
 
-| Fact | Grain | Date roles | User | Course | Instructor | Lesson | Quiz | Method |
+## Four business processes and seven conformed dimensions
+
+The model is a fact constellation, also called a Galaxy schema: four stars share consistent dimensions. Each fact retains its own grain.
+
+| Fact | One row represents | Date role | User | Course | Instructor | Lesson | Quiz | Method |
 |---|---|---|---|---|---|---|---|---|
-| fact_enrollments | Một enrollment_id, accumulating snapshot | enrolled, completed | ✓ | ✓ | ✓ | | | |
-| fact_payments | Một payment_id, transaction_id duy nhất | paid | ✓ | ✓ | ✓ | | | ✓ |
-| fact_lesson_completions | Một completion_id, enrollment + lesson duy nhất | completed | ✓ | ✓ | | ✓ | | |
-| fact_quiz_attempts | Một attempt_id, enrollment + quiz + attempt_number duy nhất | attempted | ✓ | ✓ | | | ✓ | |
+| `fact_enrollments` | An enrollment, updated as progress changes | enrolled / completed | yes | yes | yes | | | |
+| `fact_payments` | A payment transaction | paid | yes | yes | yes | | | yes |
+| `fact_lesson_completions` | A completed lesson within an enrollment | completed | yes | yes | | yes | | |
+| `fact_quiz_attempts` | An attempt at a quiz within an enrollment | attempted | yes | yes | | | yes | |
 
-Có 7 dimension. `dim_date` conformed và role playing, `dim_user` SCD Type 2, các chiều còn lại Type 1. Khóa sự kiện và transaction_id là degenerate references. Không join trực tiếp hai fact ở mức chi tiết để tính tổng. Báo cáo drill across gộp từng fact về cùng grain trước khi join.
+`dim_user` retains history with SCD Type 2. `dim_date` plays several date roles. Other dimensions retain the current master attributes (Type 1). Payment method, lesson and quiz are specialized dimensions; not every dimension belongs to every fact.
 
-`lessons_completed` là trạng thái tại snapshot hiện tại. Bộ dữ liệu không có daily snapshot, không thể suy ra đầy đủ tiến độ tại từng ngày trong quá khứ. Thời điểm sự kiện dùng UTC, kỳ cố định 2022–2024. Tiền dùng số nguyên VND, không có số thực tiền tệ.
+Drill-across reports aggregate each fact to a shared grain before joining. Joining payment rows directly to many lesson or quiz rows would multiply amounts. Count distinct people using natural `user_id`, not SCD version key `user_sk`.
 
-## Full và incremental
+Enrollment progress is a current accumulating snapshot. It does not reconstruct progress for every past day. Revenue is retained charged revenue after full-refund flags, attributed to the original payment date; there is no separate refund-date event. Values use integer VND and UTC. The generated calendar covers 2022–2024, and Gold event times have second precision.
 
-Full đọc một snapshot `REPEATABLE READ`, theo lô 50.000 dòng. Silver và revision state được ghi trong một transaction. Cờ `stage_state.needs_full` buộc dựng đầy đủ nếu full stage đã commit nhưng Gold chưa công bố. Lần chạy tiếp theo không được bỏ qua snapshot đang chờ đó.
+## Full and incremental ingestion
 
-Incremental đọc `oltp.change_journal`. Trigger gắn `source_xid`, `revision`, thao tác và payload. ETL chỉ nhận giao dịch có XID trong `[checkpoint, snapshot xmin)`. Mọi XID nhỏ hơn xmin đã kết thúc. Một giao dịch mở lâu có thể làm trì hoãn cả các giao dịch mới hơn đã commit, đổi lại không bỏ sót commit lệch thứ tự. ETL kết hợp revision mỗi khóa để bỏ qua bản cũ hoặc bản đã áp dụng từ full snapshot.
+Full extraction uses a PostgreSQL `REPEATABLE READ` snapshot and batches of at most 50,000 rows. Silver, source-version records and the pending-change state commit together. A durable `needs_full` flag prevents a failed full build from being mistaken for a completed baseline during an incremental retry.
 
-Trạng thái `source_versions` chặn replay cũ. `pending_changes` giữ các khóa đã ghi Silver nhưng chưa được công bố. Cập nhật và xóa vẫn được áp dụng sau khi pipeline thất bại rồi chạy lại, kể cả lần đọc journal tiếp theo không có phiên bản mới. Một cập nhật lỗi được cách ly và giữ bản sạch trước đó; nguồn sửa hợp lệ sẽ cập nhật Silver và đánh dấu lỗi cũ đã giải quyết.
+Incremental extraction reads `oltp.change_journal`. Source triggers record the transaction ID, revision, operation and payload in the same transaction as the business change. The ETL processes transaction IDs below the snapshot's safe boundary. This prevents an earlier open transaction from being skipped when a later transaction commits first. A long-running source transaction can delay later committed changes; completeness takes priority over advancing an unsafe checkpoint.
 
-Các dimension được dựng lại. Khi có thay đổi lịch sử hoặc master liên quan, facts được dựng lại để ánh xạ lại khóa. Fact sự kiện mới chỉ chèn delta và giữ partition cũ. Sửa một sự kiện cũ hoặc xóa vật lý sẽ dựng lại fact đó. Enrollment được thay phiên bản và gộp partition ảnh hưởng; đổi tháng ghi danh thì dựng lại. Lần rỗng kiểm tra UUID và số dòng Gold trước khi tái sử dụng. Không hỗ trợ sửa Gold thủ công ngoài pipeline.
+Per-key revision state rejects older journal updates. Pending changes survive a committed Silver transaction followed by a failed Gold build. Deletes produce durable tombstone state so replaying an older update cannot resurrect a removed record.
 
-## SCD2
+Invalid new records are quarantined and excluded from Silver. Invalid updates retain the last known clean row. A valid correction resolves the rejection; deletion of an invalid source record also resolves its open rejection.
 
-Nguồn duy trì `user_history`, mỗi phiên bản có `[valid_from, valid_to)`, sentinel 2100-01-01. Gold dùng `ASOF JOIN` theo user_id và thời điểm sự kiện rồi kiểm tra sự kiện nằm trước valid_to. `user_sk = history_id + 10000000`. Có đúng một phiên bản current, không chồng lấn hoặc đứt khoảng và không trùng thời điểm bắt đầu.
+Additive source columns outside the explicit contract are ignored. Missing required columns or incompatible types stop extraction before publication. Schema evolution is intentional: update the contract and mapping for meaningful changes, then rebuild.
 
-Địa lý trong thanh toán là địa lý tại ngày thanh toán. Enrollment dùng phiên bản tại ngày ghi danh, kể cả hoàn thành sau khi học viên chuyển vùng. Đếm người duy nhất qua nhiều fact phải dùng natural user_id thông qua dimension, không đếm user_sk.
+## Rebuild and reuse decisions
 
-## Công bố và phục hồi
+Dimensions are rebuilt when a candidate is needed. New append-only event rows can reuse existing fact partitions and insert only the delta. Updates/deletes of older events rebuild the affected fact. A changed dimension or history mapping can require rebuilding facts. Enrollment revisions are consolidated before serving; changes across enrollment-month partitions force the required rebuild.
+
+Incremental reuse checks table UUIDs and all-column content fingerprints against the committed publication. A same-row-count mutation therefore cannot silently pass as an intact warehouse. If integrity is lost, the affected build restores data from Silver. A mandatory full rebuild skips scanning the old Gold unnecessarily. These checks add real work to an empty incremental run; historical no-op timings from earlier versions are not promises for the upgraded code.
+
+## Historical learner attribution
+
+Source `user_history` contains half-open intervals `[valid_from, valid_to)` with `2100-01-01` as the current-version sentinel. Each event selects the learner version whose start is the nearest one not after the event, using `ASOF JOIN`; validation also checks that the event precedes the interval end.
+
+An activity exactly at the new version's start belongs to the new version. Enrollment uses enrollment time even when completion occurs after a move; payment, lesson and quiz events use their respective event times. The gate checks a single current version, interval ordering and coverage. The warehouse cannot invent history absent from the source.
+
+## Publication and recovery
 
 ```mermaid
 stateDiagram-v2
@@ -52,27 +82,23 @@ stateDiagram-v2
   extracting --> building
   building --> publishing
   publishing --> completed
-  publishing --> recovered: UUID rollback khi tiến trình gián đoạn
-  recovered --> extracting: lần chạy mới
-  extracting --> completed: incremental rỗng, Gold còn nguyên
+  publishing --> recovered: restore exchanged table UUIDs
+  recovered --> extracting: retry from durable pending state
+  extracting --> completed: verified unchanged warehouse
   extracting --> failed
   building --> failed
 ```
 
-Trước đổi bảng đầu tiên, ETL lưu UUID bảng cũ, UUID ứng viên và phase `publishing` trong PostgreSQL. Feed materialized view được gỡ trước khi đổi bảng và tạo lại sau đó. Nếu bị dừng, lần chạy kế tiếp so UUID thực tế và đảo các bảng đã đổi về bản trước. Không dựa vào một danh sách chỉ nằm trong RAM. Nếu UUID không khớp kế hoạch, hệ thống dừng và giữ nguyên `gold_build` để điều tra.
+Before exchanging the first table, PostgreSQL stores the candidate and previous UUID for every table. If a process stops during publication, the next pipeline compares actual UUIDs with this plan and restores tables already exchanged. Unknown UUIDs cause a stop for investigation, rather than speculative deletion of candidate data. Aggregate view feeds are dropped before exchanging their target tables and recreated afterward.
 
-Sau khi đổi đủ bảng và tạo feed, ETL commit manifest thành công, checkpoint và xóa pending changes trong cùng transaction PostgreSQL. Sau đó mới xóa Gold cũ. JSON là bản xuất hỗ trợ đọc và bàn giao; `published_state` là trạng thái có thẩm quyền.
+Only after all exchanges and feeds succeed does one PostgreSQL transaction commit the publication manifest/checkpoint and consume pending changes. JSON files are readable exports; PostgreSQL publication state is authoritative. A stale `pipeline.json` cannot make a newly created database ready.
 
-`EXCHANGE TABLES` chỉ nguyên tử ở từng bảng. CLI và portal dùng PostgreSQL advisory lock chung, writer độc quyền, reader chia sẻ. Dashboard lấy một snapshot gồm toàn bộ dữ liệu biểu đồ trong cùng khóa đọc. Reports có khóa đọc, benchmark và validate có khóa độc quyền do sử dụng schema tạm. Consumer SQL bên ngoài phải tránh cửa sổ công bố hoặc dùng cùng khóa trong database staging. Khóa chỉ có tác dụng khi còn giữ connection.
+`EXCHANGE TABLES` is atomic for one table, not for the complete multi-database operation. Project writers acquire an exclusive PostgreSQL advisory lock; reports and dashboard snapshots acquire a shared lock. Connections are retained for the entire protected operation and closed on failures. External SQL clients must honor the same lock or avoid the publication window.
 
-## Quyền và tài nguyên
+## Access and deployment scope
 
-`learning_reader` chỉ SELECT nguồn, giao dịch mặc định read only. `learning_stage` ghi Silver/control/quarantine/benchmark và không CONNECT OLTP. Dashboard không nhận mật khẩu quản trị PostgreSQL. Tài khoản ClickHouse hiện dùng chung cho pipeline và dashboard trong phạm vi localhost.
+`learning_reader` can only read the source. `learning_stage` writes staging/control/benchmark data and cannot connect to OLTP. Dashboard configuration does not contain the PostgreSQL administrative password. Dashboard pipeline execution is disabled by default; explicitly setting `DW_DASHBOARD_ALLOW_PIPELINE=1` enables the local operator action.
 
-PostgreSQL giới hạn 2 GiB/4 CPU, ClickHouse 3 GiB/4 CPU, runner 1500 MiB/4 CPU, dashboard 1500 MiB/2 CPU. ClickHouse query giới hạn 1,8 GB, spill sort/group by ở 500 MB và 4 thread. Nguồn và Gold dùng volume riêng; Docker image không chứa artifacts, .env hoặc dữ liệu runtime.
+All host ports bind to loopback. Memory limits are configurable and recorded in benchmark metadata. CPU limits are quotas on a shared host. Application containers use an init process and prohibit privilege escalation.
 
-## Giới hạn thiết kế
-
-Journal do trigger quản lý trong cùng PostgreSQL, chưa có WAL connector, retention, backpressure hoặc lịch chạy tự động. Không tắt trigger, không TRUNCATE nguồn để mô phỏng delete; các thao tác đó cần full reload. `dw.bulk_seed` chỉ dùng trong generator trên nguồn trống. Không bật tùy chọn đó cho thay đổi thường ngày.
-
-Đổi schema nguồn cần sửa contract và mapping, rồi chạy full. Lịch ngoài 2022–2024 cần mở rộng dimension ngày và quality gate. Trường sự kiện Gold hiện lưu độ chính xác giây; không dùng cho nguồn cần bảo toàn phần nhỏ giây. Chưa có authentication portal, backup tự động hoặc nghiệm thu tải production. Các giới hạn này được giữ rõ trong bàn giao.
+The ClickHouse account is shared between ETL and dashboard in this local demo. Read-only UI controls are not database authorization. There is no application authentication, distributed HA, tested backup restoration or production load qualification. Put authentication and separate least-privilege database roles in place before considering a network deployment. See [security](../SECURITY.md) and [operations](operations.md).

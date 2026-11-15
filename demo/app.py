@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import date
@@ -20,11 +21,29 @@ from demo.charts import (
     revenue_bridge,
     METHOD_LABELS,
 )
-from demo.data import options, snapshot, detail
-from demo.presentation import metrics, card_title, empty, progress, ratio, percent, change, icon
+from demo.data import options, snapshot, operations_snapshot, detail
+from demo.presentation import (
+    metrics,
+    card_title,
+    empty,
+    progress,
+    ratio,
+    percent,
+    change,
+    icon,
+    csv_bytes,
+)
 from etl.common import ROOT
 
-PAGES = ["Tổng quan", "Tài chính", "Học tập", "Đề thi", "Thị trường", "Chất lượng & vận hành"]
+PAGES = ["Overview", "Finance", "Learning", "Quizzes", "Markets", "Quality & operations"]
+PAGE_DESCRIPTIONS = {
+    "Overview": "Follow revenue, enrollment, and completion in one published snapshot.",
+    "Finance": "Understand the path from original transaction value to net revenue.",
+    "Learning": "Track enrollment cohorts and their current completion outcomes.",
+    "Quizzes": "Compare assessment outcomes with attempt volume and study context.",
+    "Markets": "Explore instructors and learner locations at payment time.",
+    "Quality & operations": "Inspect publication health, quarantined records, and pipeline history.",
+}
 _cards = count()
 
 
@@ -47,14 +66,19 @@ st.markdown(
 )
 
 
-@st.cache_data(ttl=60, show_spinner="Đang tải dữ liệu phân tích…")
+@st.cache_data(ttl=60, show_spinner="Loading analytics…")
 def load_data(run_id, start, end, categories):
     return snapshot(run_id, start, end, categories)
 
 
-@st.cache_data(ttl=60, show_spinner="Đang tải phân tích chi tiết…")
+@st.cache_data(ttl=60, show_spinner="Loading detailed analysis…")
 def load_detail(run_id, kind, start, end, categories):
     return detail(run_id, kind, start, end, categories)
+
+
+@st.cache_data(ttl=10, show_spinner="Loading warehouse status…")
+def load_operations(run_id):
+    return operations_snapshot(run_id)
 
 
 def plot(figure, key):
@@ -80,8 +104,8 @@ def table(frame, key, renames=None):
     )
     filename = f"{key}_{start.isoformat()}_{end.isoformat()}.csv"
     st.download_button(
-        "Xuất CSV",
-        display.to_csv(index=False).encode("utf-8-sig"),
+        "Download CSV",
+        csv_bytes(display),
         file_name=filename,
         mime="text/csv",
         key="export_" + key,
@@ -101,48 +125,52 @@ with st.sidebar:
         + '</div><div><div class="brand-name">Learning Warehouse</div><div class="brand-sub">ANALYTICS WORKSPACE</div></div></div>',
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="nav-caption">KHÔNG GIAN PHÂN TÍCH</div>', unsafe_allow_html=True)
-    page = st.radio("Điều hướng", PAGES, key="nav", label_visibility="collapsed")
+    st.markdown('<div class="nav-caption">EXPLORE</div>', unsafe_allow_html=True)
+    page = st.radio("Navigation", PAGES, key="nav", label_visibility="collapsed")
     st.divider()
-    st.markdown('<div class="nav-caption">DỮ LIỆU</div>', unsafe_allow_html=True)
-    if st.button("↻  Làm mới dữ liệu", use_container_width=True):
+    st.markdown('<div class="nav-caption">DATA</div>', unsafe_allow_html=True)
+    if st.button("↻  Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
 try:
     manifest, categories, bounds = options()
 except Exception:
-    st.title("Kho dữ liệu đang được chuẩn bị")
-    st.info("Dữ liệu đang nạp hoặc chưa sẵn sàng. Bạn có thể làm mới sau khi lần nạp hoàn tất.")
+    logging.exception("Dashboard publication discovery failed")
+    st.title("The warehouse is not ready yet")
+    st.info(
+        "No published snapshot is available, or a pipeline is publishing. Refresh after the pipeline finishes."
+    )
     st.stop()
 
 with st.sidebar:
     published_at = pd.to_datetime(manifest["finished_at"], utc=True).strftime(
-        "%d/%m/%Y · %H:%M UTC"
+        "%d %b %Y · %H:%M UTC"
     )
     st.markdown(
-        '<div class="sidebar-meta">Cập nhật bản dữ liệu<br><strong>'
+        '<div class="sidebar-meta">Published snapshot<br><strong>'
         + published_at
         + "</strong><br><br>"
-        + f"{sum(manifest['tables'].values()):,}".replace(",", ".")
-        + " dòng đã chuẩn hóa<br>Kỳ sự kiện <strong>2022 – 2024</strong></div>",
+        + f"{sum(manifest['tables'].values()):,}"
+        + " source rows in snapshot<br>Event calendar <strong>2022 – 2024</strong></div>",
         unsafe_allow_html=True,
     )
     st.divider()
     st.markdown(
-        '<div class="sidebar-meta">Nguồn dữ liệu giả lập<br>Tiền tệ VND · Múi giờ UTC</div>',
+        '<div class="sidebar-meta">Synthetic source data<br>Currency VND · Time zone UTC</div>',
         unsafe_allow_html=True,
     )
 
 st.markdown(
-    '<div class="page-top"><div class="breadcrumb">Phân tích <span style="padding:0 7px">/</span><b>'
+    '<div class="page-top"><div class="breadcrumb">Analytics <span style="padding:0 7px">/</span><b>'
     + escape(page)
-    + '</b></div><div class="publish-tag"><span class="status-dot"></span>Đã đối soát · '
+    + '</b></div><div class="publish-tag"><span class="status-dot"></span>Validated · '
     + str(manifest["quality_checks"])
-    + " kiểm tra</div></div>",
+    + " checks</div></div>",
     unsafe_allow_html=True,
 )
 st.title(page)
+st.caption(PAGE_DESCRIPTIONS[page])
 
 if "period" not in st.session_state:
     st.session_state["period"] = str(bounds[1].year)
@@ -153,127 +181,137 @@ with st.container(key="filterbar"):
     first, second, third = st.columns([1.25, 1.45, 0.65])
     with first:
         periods = [str(year) for year in range(bounds[1].year, 2021, -1)] + [
-            "Toàn kỳ 2022–2024",
-            "Tùy chọn",
+            "All time · 2022–2024",
+            "Custom dates",
         ]
         period = st.selectbox(
-            "Kỳ phân tích", periods, key="period", disabled=page == "Chất lượng & vận hành"
+            "Reporting period", periods, key="period", disabled=page == "Quality & operations"
         )
     with second:
         selected = st.session_state["categories"]
         label = (
-            "Tất cả lĩnh vực"
+            "All categories"
             if len(selected) == len(categories)
-            else (selected[0] if len(selected) == 1 else f"{len(selected)} lĩnh vực")
+            else (selected[0] if len(selected) == 1 else f"{len(selected)} categories")
         )
-        st.caption("Lĩnh vực khóa học")
-        with st.popover(label, use_container_width=True, disabled=page == "Chất lượng & vận hành"):
-            st.multiselect("Lĩnh vực khóa học", categories, key="categories")
+        st.caption("Course categories")
+        with st.popover(label, use_container_width=True, disabled=page == "Quality & operations"):
+            st.multiselect("Course categories", categories, key="categories")
     with third:
-        st.button("Đặt lại", on_click=reset_filters, use_container_width=True)
-    if period == "Tùy chọn":
+        st.button("Reset", on_click=reset_filters, use_container_width=True)
+    if period == "Custom dates" and page != "Quality & operations":
         chosen = st.date_input(
-            "Từ ngày – đến ngày",
+            "Start date – end date",
             min_value=date(2022, 1, 1),
             max_value=date(2024, 12, 31),
             value=(date(2022, 1, 1), date(2024, 12, 31)),
             key="custom_dates",
         )
         if len(chosen) != 2:
-            st.info("Chọn đủ ngày bắt đầu và ngày kết thúc.")
+            st.info("Select both a start date and an end date.")
             st.stop()
         start, end = chosen
-    elif period.startswith("Toàn kỳ"):
+    elif period.startswith("All time") or page == "Quality & operations":
         start, end = date(2022, 1, 1), date(2024, 12, 31)
     else:
         start, end = date(int(period), 1, 1), date(int(period), 12, 31)
         if int(period) == bounds[1].year:
             end = min(end, bounds[1])
 selected_categories = st.session_state["categories"]
-if page == "Chất lượng & vận hành":
+if page == "Quality & operations":
     start, end, selected_categories = date(2022, 1, 1), date(2024, 12, 31), categories
 if not selected_categories:
-    empty("Chọn ít nhất một lĩnh vực trong bộ lọc để bắt đầu phân tích.")
+    empty("Select at least one course category to start exploring.")
     st.stop()
-if page == "Chất lượng & vận hành":
+if page == "Quality & operations":
     st.markdown(
-        '<div class="scope-caption">Trạng thái toàn kho · Bộ lọc phân tích không áp dụng cho trang này</div>',
+        '<div class="scope-caption">Warehouse-wide status · Analytical filters do not apply to this page</div>',
         unsafe_allow_html=True,
     )
 else:
     st.markdown(
         '<div class="scope-caption">'
-        + f"{start:%d/%m/%Y} — {end:%d/%m/%Y} · {len(selected_categories)} lĩnh vực"
+        + f"{start:%d %b %Y} — {end:%d %b %Y} · {len(selected_categories)} categories"
         + "</div>",
         unsafe_allow_html=True,
     )
 
 try:
-    data = load_data(manifest["run_id"], start, end, selected_categories)
+    data = (
+        load_operations(manifest["run_id"])
+        if page == "Quality & operations"
+        else load_data(manifest["run_id"], start, end, selected_categories)
+    )
 except Exception:
     logging.exception("Dashboard snapshot failed")
-    st.error("Không thể tải bản dữ liệu. Hãy làm mới sau khi quá trình nạp kết thúc.")
+    st.error(
+        "This snapshot could not be loaded. Refresh after the pipeline finishes, or check service health."
+    )
     st.stop()
 
-monthly = data["finance"].copy()
-funnel = data["funnel"].iloc[0]
-net = int(monthly.net_vnd.sum())
-gross = int(monthly.gross_vnd.sum())
-payments = int(monthly.payments.sum())
-completion = ratio(funnel.completed, funnel.enrolled)
-prior = data["baseline"]
-prior_rate = ratio(prior["completed"], prior["enrolled"]) if prior else None
-comparison_note = "so với cùng kỳ " + str(prior["start"].year) if prior else "Trong kỳ đã chọn"
+prior = None
+if page != "Quality & operations":
+    monthly = data["finance"].copy()
+    funnel = data["funnel"].iloc[0]
+    net = int(monthly.net_vnd.sum())
+    gross = int(monthly.gross_vnd.sum())
+    payments = int(monthly.payments.sum())
+    completion = ratio(funnel.completed, funnel.enrolled)
+    prior = data["baseline"]
+    prior_rate = ratio(prior["completed"], prior["enrolled"]) if prior else None
+    comparison_note = (
+        "vs. same period in " + str(prior["start"].year) if prior else "Selected period"
+    )
 
 
 def headline():
     metrics(
         [
             dict(
-                label="Doanh thu ròng",
-                value=short_number(net, 2) + " ₫",
+                label="Net revenue",
+                value=short_number(net, 2) + " VND",
                 icon="money",
                 delta=change(net, prior["net_vnd"]) if prior else None,
                 note=comparison_note,
             ),
             dict(
-                label="Giao dịch thanh toán",
-                value=f"{payments:,}".replace(",", "."),
+                label="Payments",
+                value=f"{payments:,}",
                 icon="chart",
                 delta=change(payments, prior["payments"]) if prior else None,
                 note=comparison_note,
             ),
             dict(
-                label="Lượt ghi danh",
-                value=f"{int(funnel.enrolled):,}".replace(",", "."),
+                label="Enrollments",
+                value=f"{int(funnel.enrolled):,}",
                 icon="users",
                 delta=change(funnel.enrolled, prior["enrolled"]) if prior else None,
                 note=comparison_note,
             ),
             dict(
-                label="Tỷ lệ hoàn thành",
+                label="Completion rate",
                 value=percent(completion),
                 icon="check",
                 delta=change(completion, prior_rate, points=True)
                 if completion is not None and prior_rate is not None
                 else None,
-                note="Theo cohort ghi danh",
+                note="Enrollment cohort",
             ),
         ]
     )
 
 
-if page == "Tổng quan":
+if page == "Overview":
     headline()
     left, right = st.columns([1.65, 1], gap="medium")
     with left, card():
         title, control = st.columns([2.5, 1])
         with title:
-            card_title("Diễn biến doanh thu", "Doanh thu ròng và giá trị giao dịch trước giảm giá")
+            card_title("Revenue trend", "Net revenue and original transaction value")
         with control:
             grain = st.selectbox(
-                "Nhóm thời gian",
-                ["Tháng", "Quý"],
+                "Time grouping",
+                ["Month", "Quarter"],
                 key="revenue_grain",
                 label_visibility="collapsed",
             )
@@ -283,9 +321,9 @@ if page == "Tổng quan":
             plot(revenue_chart(monthly, grain), "overview_revenue")
     with right, card():
         card_title(
-            "Doanh thu theo lĩnh vực",
-            "Doanh thu ròng · VND",
-            tag=f"{len(data['revenue_categories'])} lĩnh vực",
+            "Revenue by category",
+            "Net revenue · VND",
+            tag=f"{len(data['revenue_categories'])} categories",
         )
         if data["revenue_categories"].empty:
             empty()
@@ -296,124 +334,129 @@ if page == "Tổng quan":
             )
     left, right = st.columns([1.65, 1], gap="medium")
     with left, card():
-        card_title("Ghi danh theo tháng", "Số lượt ghi danh trong kỳ")
+        card_title("Monthly enrollments", "Enrollments started in the selected period")
         if data["enrollment_trend"].empty:
             empty()
         else:
             plot(enrollment_chart(data["enrollment_trend"]), "overview_enrollments")
     with right, card():
-        card_title("Phương thức thanh toán", "Cơ cấu theo số giao dịch")
+        card_title("Payment methods", "Share of transaction count")
         if data["methods"].empty:
             empty()
         else:
             plot(payment_mix(data["methods"]), "overview_methods")
 
-elif page == "Tài chính":
+elif page == "Finance":
     metrics(
         [
             dict(
-                label="Doanh thu ròng",
-                value=short_number(net, 2) + " ₫",
+                label="Net revenue",
+                value=short_number(net, 2) + " VND",
                 icon="money",
                 delta=change(net, prior["net_vnd"]) if prior else None,
                 note=comparison_note,
             ),
-            dict(label="Giá trị giao dịch gốc", value=short_number(gross, 2) + " ₫", icon="chart"),
             dict(
-                label="Tỷ lệ giảm giá",
-                value=percent(ratio(monthly.discount_vnd.sum(), gross)),
-                icon="money",
-                note="Giảm giá / giá trị gốc",
+                label="Original transaction value",
+                value=short_number(gross, 2) + " VND",
+                icon="chart",
             ),
             dict(
-                label="Tỷ lệ hoàn tiền",
+                label="Discount rate",
+                value=percent(ratio(monthly.discount_vnd.sum(), gross)),
+                icon="money",
+                note="Discounts / original value",
+            ),
+            dict(
+                label="Refund rate",
                 value=percent(ratio(monthly.refunds.sum(), payments)),
                 icon="check",
-                note="Giao dịch hoàn / thanh toán",
+                note="Refunded transactions / payments",
             ),
         ]
     )
     with card():
-        card_title("Doanh thu theo thời gian", "VND · Theo ngày thanh toán")
+        card_title("Revenue over time", "VND · By payment date")
         if monthly.empty:
             empty()
         else:
             plot(revenue_chart(monthly), "finance_revenue")
     left, right = st.columns([1.55, 1], gap="medium")
     with left, card():
-        card_title("Từ giá trị gốc đến doanh thu ròng", "Hoàn tiền được quy về ngày thanh toán gốc")
+        card_title(
+            "From original value to net revenue",
+            "Refunds are attributed to the original payment date",
+        )
         if monthly.empty:
             empty()
         else:
             plot(revenue_bridge(monthly), "finance_bridge")
     with right, card():
-        card_title("Doanh thu theo phương thức", "Doanh thu ròng · VND")
+        card_title("Revenue by payment method", "Net revenue · VND")
         methods = data["methods"].copy()
         methods["method"] = methods.method_name.map(lambda name: METHOD_LABELS.get(name, name))
         if methods.empty:
             empty()
         else:
             plot(ranked_chart(methods, "net_vnd", "method", height=280), "finance_methods")
-    with st.expander("Chi tiết doanh thu và xuất dữ liệu"):
+    with st.expander("Revenue details and export"):
         table(
             monthly,
-            "doanh_thu",
+            "revenue",
             {
-                "month": "Tháng",
-                "net_vnd": "Doanh thu ròng (₫)",
-                "gross_vnd": "Giá trị gốc (₫)",
-                "discount_vnd": "Giảm giá (₫)",
-                "refund_vnd": "Hoàn tiền (₫)",
-                "payments": "Giao dịch",
-                "refunds": "Giao dịch hoàn",
+                "month": "Month",
+                "net_vnd": "Net revenue (VND)",
+                "gross_vnd": "Original value (VND)",
+                "discount_vnd": "Discounts (VND)",
+                "refund_vnd": "Refunds (VND)",
+                "payments": "Transactions",
+                "refunds": "Refunded payments",
             },
         )
 
-elif page == "Học tập":
+elif page == "Learning":
     metrics(
         [
             dict(
-                label="Lượt ghi danh",
-                value=f"{int(funnel.enrolled):,}".replace(",", "."),
+                label="Enrollments",
+                value=f"{int(funnel.enrolled):,}",
                 icon="users",
             ),
             dict(
-                label="Bắt đầu học",
+                label="Started learning",
                 value=percent(ratio(funnel.started, funnel.enrolled)),
                 icon="book",
-                note="Có ít nhất một bài hoàn thành",
+                note="At least one completed lesson",
             ),
             dict(
-                label="Hoàn thành khóa",
+                label="Course completion",
                 value=percent(completion),
                 icon="check",
-                note=f"{int(funnel.completed):,} lượt hoàn thành".replace(",", "."),
+                note=f"{int(funnel.completed):,} completed enrollments",
             ),
             dict(
-                label="Thời gian hoàn thành",
-                value=f"{funnel.avg_days:.1f}".replace(".", ",") + " ngày"
-                if pd.notna(funnel.avg_days)
-                else "—",
+                label="Time to complete",
+                value=f"{funnel.avg_days:.1f}" + " days" if pd.notna(funnel.avg_days) else "—",
                 icon="clock",
-                note="Trung bình của lượt đã hoàn thành",
+                note="Average among completed enrollments",
             ),
         ]
     )
     st.caption(
-        "Cohort gồm lượt ghi danh trong kỳ. Trạng thái hoàn thành tính đến bản dữ liệu hiện tại, kể cả hoàn thành sau kỳ đã chọn."
+        "The cohort includes enrollments started in the selected period. Completion reflects the current published snapshot, including completions after that period."
     )
     left, right = st.columns([1, 1], gap="medium")
     with left, card():
-        card_title("Hành trình học tập", "Số lượt ghi danh tại từng giai đoạn")
+        card_title("Learning progression", "Enrollments at each stage")
         progress(
             [
-                ("Ghi danh", int(funnel.enrolled)),
-                ("Bắt đầu học", int(funnel.started)),
-                ("Hoàn thành", int(funnel.completed)),
+                ("Enrollments", int(funnel.enrolled)),
+                ("Started learning", int(funnel.started)),
+                ("Completed", int(funnel.completed)),
             ]
         )
     with right, card():
-        card_title("Hoàn thành theo lĩnh vực", "Hoàn thành / ghi danh · %")
+        card_title("Completion by category", "Completed / enrolled · %")
         if data["courses"].empty:
             empty()
         else:
@@ -428,61 +471,66 @@ elif page == "Học tập":
                 "learning_completion",
             )
     with card():
-        card_title("Ghi danh theo cohort tháng", "Cột thể hiện số lượt ghi danh")
+        card_title("Enrollments by monthly cohort", "Bars show enrollment count")
         if data["enrollment_trend"].empty:
             empty()
         else:
             plot(enrollment_chart(data["enrollment_trend"]), "learning_trend")
-    with st.expander("Chi tiết kết quả học tập"):
+    with st.expander("Learning outcomes"):
         table(
             data["courses"],
-            "hoan_thanh",
+            "completions",
             {
-                "category": "Lĩnh vực",
-                "enrollments": "Ghi danh",
-                "completions": "Hoàn thành",
-                "completion_pct": "Hoàn thành (%)",
+                "category": "Category",
+                "enrollments": "Enrollments",
+                "completions": "Completed",
+                "completion_pct": "Completed (%)",
             },
         )
 
-elif page == "Đề thi":
+elif page == "Quizzes":
     quiz = data["quiz"].copy()
     attempts = int(quiz.attempts.sum())
     metrics(
         [
-            dict(label="Lượt làm bài", value=f"{attempts:,}".replace(",", "."), icon="book"),
+            dict(label="Quiz attempts", value=f"{attempts:,}", icon="book"),
             dict(
-                label="Tỷ lệ đạt",
+                label="Pass rate",
                 value=percent(ratio(quiz.passed.sum(), attempts)),
                 icon="check",
-                note="Điểm đạt từ 70%",
+                note="At least 70% correct",
             ),
             dict(
-                label="Tỷ lệ câu trả lời đúng",
+                label="Correct answer rate",
                 value=percent(ratio(quiz.correct_answers.sum(), quiz.question_count.sum())),
                 icon="chart",
-                note="Tổng câu đúng / tổng câu hỏi",
+                note="Total correct answers / total questions",
             ),
-            dict(
-                label="Đề thi có lượt làm", value=f"{len(quiz):,}".replace(",", "."), icon="users"
-            ),
+            dict(label="Quizzes with attempts", value=f"{len(quiz):,}", icon="users"),
         ]
     )
     with card():
-        card_title("Đề thi có tỷ lệ trượt cao", "Xếp theo tỷ lệ trượt, sau đó theo số lượt làm bài")
+        card_title(
+            "Quizzes with the highest failure rate", "Ranked by failure rate, then attempt volume"
+        )
         first, second, third = st.columns([1, 1, 1.5])
         with first:
-            top = st.selectbox("Số đề hiển thị", [5, 10, 15], index=1, key="quiz_top")
+            top = st.selectbox("Quizzes to show", [5, 10, 15], index=1, key="quiz_top")
         with second:
+            maximum = max(1, int(quiz.attempts.max())) if not quiz.empty else 1
+            st.session_state["quiz_min"] = min(
+                max(1, int(st.session_state.get("quiz_min", 1))), maximum
+            )
             minimum = st.number_input(
-                "Lượt thi tối thiểu",
+                "Minimum attempts",
                 min_value=1,
-                max_value=max(1, int(quiz.attempts.max())) if not quiz.empty else 1,
-                value=1,
+                max_value=maximum,
                 key="quiz_min",
             )
         with third:
-            search = st.text_input("Tìm đề thi", placeholder="Mã đề hoặc tên đề", key="quiz_search")
+            search = st.text_input(
+                "Search quizzes", placeholder="Quiz ID or title", key="quiz_search"
+            )
         filtered = quiz.loc[quiz.attempts >= minimum].copy()
         if search:
             filtered = filtered.loc[
@@ -497,71 +545,71 @@ elif page == "Đề thi":
             .head(top)
             .copy()
         )
-        difficult["label"] = difficult.quiz_id.map(lambda value: f"Đề {value}")
+        difficult["label"] = difficult.quiz_id.map(lambda value: f"Quiz {value}")
         if difficult.empty:
-            empty("Không có đề thi phù hợp với điều kiện đã chọn.")
+            empty("No quizzes match these filters.")
         else:
             plot(ranked_chart(difficult, "fail_pct", "label", "percent"), "exam_ranking")
-    with st.expander("Chi tiết đề thi và xuất dữ liệu"):
+    with st.expander("Quiz details and export"):
         table(
             filtered,
-            "de_thi",
+            "quizzes",
             {
-                "quiz_id": "Mã đề",
-                "quiz_title": "Tên đề",
-                "category": "Lĩnh vực",
-                "attempts": "Lượt thi",
-                "pass_pct": "Đạt (%)",
-                "fail_pct": "Trượt (%)",
-                "avg_score_pct": "Điểm trung bình (%)",
-                "duration_score_corr": "Tương quan thời lượng–điểm",
-                "passed": "Lượt đạt",
-                "correct_answers": "Câu đúng",
-                "question_count": "Tổng câu hỏi",
+                "quiz_id": "Quiz ID",
+                "quiz_title": "Quiz title",
+                "category": "Category",
+                "attempts": "Attempts",
+                "pass_pct": "Pass (%)",
+                "fail_pct": "Fail (%)",
+                "avg_score_pct": "Average score (%)",
+                "duration_score_corr": "Duration–score correlation",
+                "passed": "Passed attempts",
+                "correct_answers": "Correct answers",
+                "question_count": "Questions",
             },
         )
-    with st.expander("Phân tích thời gian học và điểm quiz"):
+    with st.expander("Study time and quiz scores"):
         st.caption(
-            "Tính trên ghi danh có cả bài học và quiz trong kỳ. Tương quan không chứng minh quan hệ nhân quả; không xác định khi điểm hoặc thời lượng không biến thiên."
+            "Includes enrollments with both completed lessons and quiz attempts in this period. Correlation does not establish causation; it is undefined when scores or durations do not vary."
         )
-        if st.checkbox("Tải phân tích tương quan", key="study_detail"):
+        if st.checkbox("Load correlation analysis", key="study_detail"):
             try:
                 study = load_detail(manifest["run_id"], "study", start, end, selected_categories)
                 table(
                     study,
-                    "tuong_quan_hoc_diem",
+                    "study_score_correlation",
                     {
-                        "course_id": "Mã khóa",
-                        "title": "Khóa học",
-                        "enrollments": "Ghi danh",
-                        "correlation": "Tương quan",
+                        "course_id": "Course ID",
+                        "title": "Course",
+                        "enrollments": "Enrollments",
+                        "correlation": "Correlation",
                     },
                 )
             except Exception:
                 logging.exception("Study drilldown failed")
-                st.error("Chưa thể tải phân tích chi tiết. Hãy làm mới dữ liệu rồi thử lại.")
+                st.error(
+                    "The detailed analysis could not be loaded. Refresh the snapshot and try again."
+                )
 
-elif page == "Thị trường":
+elif page == "Markets":
     cities = data["cities"]
     metrics(
         [
-            dict(label="Doanh thu ròng", value=short_number(net, 2) + " ₫", icon="money"),
+            dict(label="Net revenue", value=short_number(net, 2) + " VND", icon="money"),
+            dict(label="Payments", value=f"{payments:,}", icon="chart"),
+            dict(label="Cities with payments", value=str(len(cities)), icon="users"),
             dict(
-                label="Giao dịch thanh toán", value=f"{payments:,}".replace(",", "."), icon="chart"
-            ),
-            dict(label="Thành phố có giao dịch", value=str(len(cities)), icon="users"),
-            dict(
-                label="Tỷ trọng thành phố dẫn đầu",
+                label="Leading city share",
                 value=percent(ratio(cities.net_vnd.iloc[0], net)) if not cities.empty else "—",
                 icon="chart",
-                note=str(cities.city.iloc[0]) if not cities.empty else "Chưa có giao dịch",
+                note=str(cities.city.iloc[0]) if not cities.empty else "No payments",
             ),
         ]
     )
     left, right = st.columns([1.3, 1], gap="medium")
     with left, card():
-        card_title("Giảng viên theo doanh thu", "Doanh thu ròng · VND")
-        limit = st.selectbox("Số giảng viên", [5, 10, 15], index=1, key="instructor_limit")
+        card_title("Instructors by revenue", "Net revenue · VND")
+        limit = st.selectbox("Instructors to show", [5, 10, 15], index=1, key="instructor_limit")
         instructors = data["instructors"].head(limit).copy()
         instructors["label"] = (
             instructors.apply(
@@ -578,32 +626,32 @@ elif page == "Thị trường":
         else:
             plot(ranked_chart(instructors, "net_vnd", "label"), "market_instructors")
     with right, card():
-        card_title("Doanh thu theo địa lý", "Thành phố của học viên tại ngày thanh toán")
+        card_title("Revenue by location", "Learner city at payment time")
         if cities.empty:
             empty()
         else:
             plot(ranked_chart(cities, "net_vnd", "city", height=365), "market_cities")
-    with st.expander("Chi tiết giảng viên và địa lý"):
+    with st.expander("Instructor and location details"):
         table(
             data["instructors"],
-            "giang_vien",
+            "instructors",
             {
-                "instructor_id": "Mã giảng viên",
-                "full_name": "Giảng viên",
-                "net_vnd": "Doanh thu ròng (₫)",
-                "payments": "Giao dịch",
+                "instructor_id": "Instructor ID",
+                "full_name": "Instructor",
+                "net_vnd": "Net revenue (VND)",
+                "payments": "Transactions",
             },
         )
         table(
             cities,
-            "dia_ly",
-            {"city": "Thành phố", "net_vnd": "Doanh thu ròng (₫)", "payments": "Giao dịch"},
+            "locations",
+            {"city": "City", "net_vnd": "Net revenue (VND)", "payments": "Transactions"},
         )
-    with st.expander("Học viên chuyển vùng và tăng trưởng theo năm"):
+    with st.expander("Learner relocation and annual revenue"):
         st.caption(
-            "Địa lý theo lịch sử tại ngày thanh toán. YoY chỉ tính khi chọn đủ hai năm lịch liền kề và doanh thu năm trước khác 0."
+            "Location follows learner history at payment time. Year-over-year change requires two complete consecutive calendar years and nonzero prior-year revenue."
         )
-        if st.checkbox("Tải lịch sử học viên chuyển vùng", key="mover_detail"):
+        if st.checkbox("Load relocation history", key="mover_detail"):
             try:
                 movers = load_detail(
                     manifest["run_id"], "movers", start, end, selected_categories
@@ -621,78 +669,80 @@ elif page == "Thị trường":
                 ]
                 table(
                     movers,
-                    "hoc_vien_chuyen_vung",
+                    "learner_relocations",
                     {
-                        "city": "Thành phố",
-                        "year": "Năm",
-                        "net_vnd": "Doanh thu ròng (₫)",
+                        "city": "City",
+                        "year": "Year",
+                        "net_vnd": "Net revenue (VND)",
                         "yoy_pct": "YoY (%)",
                     },
                 )
             except Exception:
                 logging.exception("Mover drilldown failed")
-                st.error("Chưa thể tải lịch sử địa lý. Hãy làm mới dữ liệu rồi thử lại.")
+                st.error(
+                    "The location history could not be loaded. Refresh the snapshot and try again."
+                )
 
 else:
     errors = data["quarantine"]
-    total_errors = int(errors["Tổng"].sum()) if not errors.empty else 0
-    open_errors = int(errors["Chưa xử lý"].sum()) if not errors.empty else 0
+    total_errors = int(errors["Total"].sum()) if not errors.empty else 0
+    open_errors = int(errors["Open"].sum()) if not errors.empty else 0
     metrics(
         [
             dict(
-                label="Kiểm tra chất lượng",
+                label="Quality checks",
                 value=str(manifest["quality_checks"]),
                 icon="check",
-                note="Bản Gold đã công bố",
+                note="Published Gold snapshot",
             ),
             dict(
-                label="Lỗi chưa giải quyết",
+                label="Open issues",
                 value=str(open_errors),
                 icon="book",
-                note="Bản ghi trong quarantine",
+                note="Quarantined records",
             ),
             dict(
-                label="Lỗi đã giải quyết",
+                label="Resolved issues",
                 value=str(total_errors - open_errors),
                 icon="check",
-                note="Đã có phiên bản hợp lệ thay thế",
+                note="Replaced by valid source data",
             ),
             dict(
-                label="Lần nạp gần nhất",
-                value=f"{manifest['seconds']:.2f}".replace(".", ",") + " giây",
+                label="Latest published load",
+                value=f"{manifest['seconds']:.2f}" + " s",
                 icon="clock",
-                note="Incremental rỗng" if manifest.get("gold_reused") else manifest["mode"],
+                note="No-change incremental" if manifest.get("gold_reused") else manifest["mode"],
             ),
         ]
     )
-    quality_tab, ops_tab = st.tabs(["Chất lượng dữ liệu", "Nhật ký vận hành"])
+    quality_tab, ops_tab = st.tabs(["Data quality", "Run history"])
     with quality_tab, card():
-        card_title("Trạng thái bản dữ liệu", tag="Đã đối soát")
+        card_title("Snapshot status", tag="Validated")
         st.markdown(
             '<div class="quality-summary"><b>'
             + (
-                "Không có bản ghi cần xử lý"
+                "No open data issues"
                 if not open_errors
-                else str(open_errors) + " bản ghi đang cần xử lý"
+                else str(open_errors) + " records require attention"
             )
-            + "</b><p>Kiểm tra kiểu dữ liệu, khóa tham chiếu, lịch sử học viên, tiền và đối soát tổng trước khi công bố.</p></div>",
+            + "</b><p>Data types, references, learner history, amounts, and aggregate totals are checked before publication.</p></div>",
             unsafe_allow_html=True,
         )
         st.caption(
-            "Kiểm tra gần nhất "
+            "Last validated "
             + pd.to_datetime(manifest["quality_checked_at"], utc=True).strftime(
-                "%d/%m/%Y %H:%M UTC"
+                "%d %b %Y %H:%M UTC"
             )
-            + ". Lần nạp rỗng giữ kết quả kiểm tra của bản Gold trước đó."
+            + ". No-change runs retain the quality results of the previous Gold snapshot."
         )
         if not errors.empty:
-            table(errors, "tong_hop_cach_ly")
-            with st.expander("Các lỗi phát hiện gần nhất"):
-                table(data["recent_errors"], "loi_gan_nhat")
+            table(errors, "quarantine_summary")
+            with st.expander("Recently detected issues"):
+                table(data["recent_errors"], "recent_issues")
     with ops_tab, card():
-        card_title("Lịch sử nạp dữ liệu", "10 lần chạy gần nhất")
-        table(data["runs"], "nhat_ky_pipeline")
-        with st.expander("Thông tin bản công bố"):
+        card_title("Pipeline runs", "10 most recent runs")
+        table(data["runs"], "pipeline_runs")
+        with st.expander("Publication details"):
             st.json(
                 {
                     key: manifest.get(key)
@@ -710,11 +760,16 @@ else:
                 }
             )
         st.caption(
-            "Nạp incremental xử lý thay đổi trên toàn nguồn, không phụ thuộc bộ lọc phân tích."
+            "Incremental loading processes changes across the entire source, independently of analytical filters."
         )
-        if st.button("Nạp dữ liệu tăng dần", type="primary"):
+        if os.getenv("DW_DASHBOARD_ALLOW_PIPELINE", "0") != "1":
+            st.caption(
+                "Read-only dashboard. Run pipeline commands from the CLI, or explicitly enable "
+                "the local operator control with DW_DASHBOARD_ALLOW_PIPELINE=1."
+            )
+        elif st.button("Run incremental load", type="primary"):
             try:
-                with st.spinner("Đang nạp, kiểm tra và công bố dữ liệu…"):
+                with st.spinner("Loading, validating, and publishing…"):
                     result = subprocess.run(
                         [sys.executable, "cli.py", "pipeline", "--mode", "incremental"],
                         cwd=ROOT,
@@ -724,33 +779,33 @@ else:
                     )
                 if result.returncode:
                     st.error(
-                        "Lần nạp chưa hoàn tất. Bản Gold đã công bố được giữ lại. Kiểm tra nhật ký pipeline để xử lý."
+                        "The pipeline did not complete. Review the run history and service logs before retrying."
                     )
                 else:
                     st.cache_data.clear()
                     st.rerun()
             except subprocess.TimeoutExpired:
                 st.error(
-                    "Lần nạp quá thời gian chờ. Kiểm tra trạng thái pipeline trước khi chạy lại."
+                    "The pipeline exceeded the waiting time. Check its recorded status before starting another run."
                 )
 
-with st.expander("Nguồn dữ liệu và định nghĩa chỉ số"):
+with st.expander("Data sources and metric definitions"):
     st.caption(
-        "Nguồn: ClickHouse Gold. Dữ liệu giả lập phục vụ học tập và trình diễn. Các truy vấn phân tích dùng cùng bản công bố và cùng bộ lọc."
+        "Source: ClickHouse Gold. Synthetic data for learning and demonstration. Analytical queries share the same published snapshot and filters."
     )
     st.markdown(
-        "**Doanh thu ròng** = giá trị gốc − giảm giá − hoàn tiền, tính theo ngày thanh toán. **Tỷ lệ hoàn thành** = lượt đã hoàn thành / lượt ghi danh trong cohort. **Điểm đạt** từ 70% số câu hỏi."
+        "**Net revenue** = original amount − discounts − refunds, attributed to the original payment date. **Completion rate** = completed / enrolled in the selected enrollment cohort. **Passing score** = at least 70% of questions."
     )
     st.caption(
-        "Năm mới nhất kết thúc tại ngày ghi danh cuối cùng có trong nguồn. Chọn Toàn kỳ hoặc Tùy chọn để xem những sự kiện học tập xảy ra sau ngày này."
+        "The latest year ends on the last source enrollment date. Choose All time or Custom dates to include learning events after that date."
     )
     if prior:
         st.caption(
-            f"So sánh cùng kỳ: {prior['start']:%d/%m/%Y} — {prior['end']:%d/%m/%Y}. Chênh lệch tỷ lệ tính bằng điểm phần trăm. Hai năm có thể khác số ngày do năm nhuận."
+            f"Comparison period: {prior['start']:%d %b %Y} — {prior['end']:%d %b %Y}. Rate changes use percentage points. Leap years can have different day counts."
         )
     else:
         st.caption(
-            "Không hiển thị chênh lệch khi phạm vi chọn không có kỳ so sánh phù hợp trong dữ liệu 2022–2024."
+            "Comparisons are unavailable when the selected range has no matching prior period in the 2022–2024 calendar."
         )
     source = dict(
         run_id=manifest["run_id"],
@@ -764,15 +819,14 @@ with st.expander("Nguồn dữ liệu và định nghĩa chỉ số"):
         currency="VND",
     )
     st.download_button(
-        "Tải thông tin nguồn",
+        "Download source metadata",
         json.dumps(source, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
-        file_name="nguon_du_lieu.json",
+        file_name="source_metadata.json",
         mime="application/json",
     )
 st.markdown(
-    '<div class="footer"><span>Learning Warehouse · Dữ liệu giả lập</span><span>Bản dữ liệu '
+    '<div class="footer"><span>Learning Warehouse · Synthetic data</span><span>Snapshot '
     + escape(manifest["run_id"][:8])
     + " · VND / UTC</span></div>",
     unsafe_allow_html=True,
 )
-

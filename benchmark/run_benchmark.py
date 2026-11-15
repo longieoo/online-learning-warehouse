@@ -1,16 +1,22 @@
-import os
 import csv
 import hashlib
+import io
 import json
 import platform
 import statistics
 import time
-from datetime import date, datetime
-from decimal import Decimal
+import uuid
 import pandas as pd
 from benchmark.queries import QUERIES
+from etl.integrity import fingerprints
+from benchmark.evidence import (
+    canonical,
+    row_bytes,
+    summarize,
+    configured_resources,
+    publish_bundle,
+)
 from etl.common import (
-    ROOT,
     ARTIFACTS,
     ch_connect,
     staging_connect,
@@ -21,36 +27,16 @@ from etl.common import (
 )
 
 
-def canonical(rows):
-    def norm(v):
-        if isinstance(v, Decimal):
-            return int(v) if v == v.to_integral_value() else str(v.normalize())
-        if isinstance(v, (date, datetime)):
-            return v.isoformat()
-        return v
-
-    # Compare multisets: include duplicates; ignore only DB-specific NULL ordering.
-    return sorted(
-        json.dumps([norm(v) for v in row], ensure_ascii=False, separators=(",", ":"))
-        for row in rows
-    )
-
-
 def digest(rows):
     return hashlib.sha256("\n".join(canonical(rows)).encode()).hexdigest()
 
 
-def row_bytes(row):
-    # The source convention is UTC; PG stores UTC-naive and CH returns UTC-aware.
-    normalized = [
-        v.replace(tzinfo=None).isoformat()
-        if isinstance(v, datetime)
-        else v.isoformat()
-        if isinstance(v, date)
-        else v
-        for v in row
-    ]
-    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+def verify_publication(ch, manifest):
+    """Do not attach an old pipeline identity to manually modified serving data."""
+    if fingerprints(ch) != manifest.get("fingerprints"):
+        raise RuntimeError(
+            "Gold differs from the published snapshot; rerun the pipeline before benchmarking"
+        )
 
 
 def mirror(ch, pg, tables):
@@ -101,21 +87,33 @@ def mirror(ch, pg, tables):
         for table in tables:
             cur.execute(f"ANALYZE benchmark.{table}")
     pg.commit()
-    (ROOT / "benchmark/postgres_schema.sql").write_text("\n".join(ddl) + "\n", encoding="utf-8")
+    schema_path = ARTIFACTS / "benchmark/postgres_schema.sql"
+    schema_path.parent.mkdir(parents=True, exist_ok=True)
+    schema_path.write_text("\n".join(ddl) + "\n", encoding="utf-8")
     return counts
 
 
-def benchmark(runs=5, reuse_mirror=False):
-    if runs < 3:
+def benchmark(runs=5, reuse_mirror=False, warmups=2):
+    if isinstance(runs, bool) or not isinstance(runs, int) or runs < 3:
         raise ValueError("At least 3 measured runs are required")
+    if isinstance(warmups, bool) or not isinstance(warmups, int) or warmups < 0:
+        raise ValueError("Warm-up count must be a nonnegative integer")
+    resources = configured_resources()
     manifest = require_success()
+    benchmark_id = uuid.uuid4().hex
     save_json(
         "benchmark/metadata.json",
-        dict(status="running", pipeline_run=manifest["run_id"], started_at=utc_now()),
+        dict(
+            status="running",
+            benchmark_run=benchmark_id,
+            pipeline_run=manifest["run_id"],
+            started_at=utc_now(),
+        ),
     )
-    ch, pg = ch_connect(), staging_connect()
-    warmups = 2
+    ch = pg = None
     try:
+        ch, pg = ch_connect(), staging_connect()
+        verify_publication(ch, manifest)
         tables = sorted(manifest["fingerprints"])
         begin = time.perf_counter()
         if reuse_mirror:
@@ -154,9 +152,9 @@ def benchmark(runs=5, reuse_mirror=False):
                 raise AssertionError("Full row mirror hash mismatch: " + table)
             print("Full-row hash equal: " + table, flush=True)
         pg.commit()
-        query_dir = ROOT / "benchmark/sql"
+        query_dir = ARTIFACTS / "benchmark/sql"
         query_dir.mkdir(parents=True, exist_ok=True)
-        raw, summary, parity = [], [], {}
+        raw, summary, parity, executed_sql = [], [], {}, {}
 
         def execute(engine, sql):
             start = time.perf_counter_ns()
@@ -177,8 +175,11 @@ def benchmark(runs=5, reuse_mirror=False):
             }
             for engine, sql in queries.items():
                 (query_dir / f"{name}.{engine}.sql").write_text(sql + ";\n", encoding="utf-8")
+                executed_sql[f"sql/{name}.{engine}.sql"] = (sql + ";\n").encode()
             baseline = {}
             for engine in queries:
+                # Establish parity even when the caller explicitly requests zero warm-ups.
+                _, rows = execute(engine, queries[engine])
                 for _ in range(warmups):
                     _, rows = execute(engine, queries[engine])
                 baseline[engine] = canonical(rows)
@@ -203,7 +204,7 @@ def benchmark(runs=5, reuse_mirror=False):
                             query=name,
                             engine=engine,
                             run=run + 1,
-                            milliseconds=round(elapsed, 4),
+                            milliseconds=elapsed,
                             rows=len(rows),
                         )
                     )
@@ -211,19 +212,7 @@ def benchmark(runs=5, reuse_mirror=False):
                 statistics.median(times["postgres"]),
                 statistics.median(times["clickhouse"]),
             )
-            summary.append(
-                dict(
-                    query=name,
-                    postgres_median_ms=round(pg_ms, 3),
-                    clickhouse_median_ms=round(ch_ms, 3),
-                    speedup_pg_over_ch=round(pg_ms / ch_ms, 3),
-                    postgres_min_ms=round(min(times["postgres"]), 3),
-                    postgres_max_ms=round(max(times["postgres"]), 3),
-                    clickhouse_min_ms=round(min(times["clickhouse"]), 3),
-                    clickhouse_max_ms=round(max(times["clickhouse"]), 3),
-                    result_rows=parity[name]["rows"],
-                )
-            )
+            summary.append(summarize(name, times, parity[name]["rows"]))
             print(
                 f"{name}: PG {pg_ms:.2f} ms / CH {ch_ms:.2f} ms = {pg_ms / ch_ms:.2f}x (equal)",
                 flush=True,
@@ -236,34 +225,40 @@ def benchmark(runs=5, reuse_mirror=False):
                 "SELECT name,setting,unit FROM pg_settings WHERE name IN ('work_mem','shared_buffers','max_parallel_workers_per_gather')"
             )
             pg_settings = cur.fetchall()
-            cur.execute(
-                "SELECT sum(pg_total_relation_size(quote_ident(schemaname)||'.'||quote_ident(tablename))) FROM pg_tables WHERE schemaname='benchmark'"
-            )
-            pg_bytes = int(cur.fetchone()[0])
-        storage = ch.query(
-            "SELECT sum(bytes_on_disk),sum(data_uncompressed_bytes) FROM system.parts WHERE database='gold' AND active"
-        ).first_row
+            pg_sizes = {}
+            for table in tables:
+                cur.execute("SELECT pg_total_relation_size(%s)", ("benchmark." + table,))
+                pg_sizes[table] = int(cur.fetchone()[0])
+            pg_bytes = sum(pg_sizes.values())
+        parts = ch.query(
+            "SELECT table,sum(bytes_on_disk),sum(data_uncompressed_bytes) "
+            "FROM system.parts WHERE database='gold' AND active GROUP BY table"
+        ).result_rows
+        ch_sizes = {
+            name: dict(bytes_on_disk=int(disk), uncompressed_column_bytes=int(raw))
+            for name, disk, raw in parts
+        }
+        storage = (
+            sum(ch_sizes.get(name, {}).get("bytes_on_disk", 0) for name in tables),
+            sum(ch_sizes.get(name, {}).get("uncompressed_column_bytes", 0) for name in tables),
+        )
         metadata = dict(
             status="success",
+            benchmark_run=benchmark_id,
             measured_at=utc_now(),
             pipeline_run=manifest["run_id"],
             warmup_runs=warmups,
             measured_runs=runs,
-            timing="client wall-clock execute+fetch, serial, warm cache; CH query cache disabled",
+            timing="client wall-clock execute+fetch, serial; CH query cache disabled",
+            cache_scope="One untimed parity query plus configured warm-ups; caches are not flushed",
             postgres_version=pg_version,
             clickhouse_version=ch.query("SELECT version()").first_row[0],
             python_version=platform.python_version(),
             postgres_settings=pg_settings,
-            resources=dict(
-                postgres_cpu=int(os.getenv("DW_CPUS","4")),
-                clickhouse_cpu=int(os.getenv("DW_CPUS","4")),
-                postgres_memory="2 GiB",
-                clickhouse_memory="3 GiB",
-                runner_memory="1500 MiB",
-            ),
+            resources=resources,
             limitations=[
-                "Single host Docker/WSL; no cold-cache control",
-                "Memory budgets differ; not an equal-memory engine isolation test",
+                "Single Docker host; no cold-cache control",
+                "Equal CPU quotas do not isolate engine CPU scheduling on a shared host",
                 "Network/client latency included",
                 "CPU, query peak memory and IO are not measured",
                 "Synthetic data; cannot generalize to production",
@@ -277,19 +272,35 @@ def benchmark(runs=5, reuse_mirror=False):
                 postgres_gold_with_indexes_bytes=pg_bytes,
                 clickhouse_gold_bytes_on_disk=storage[0],
                 clickhouse_gold_uncompressed_column_bytes=storage[1],
+                scope="Exactly the mirrored Gold tables; PostgreSQL includes indexes; ClickHouse active parts include metadata",
+                compared_tables=tables,
+                postgres_tables=pg_sizes,
+                clickhouse_tables={name: ch_sizes.get(name, {}) for name in tables},
+                clickhouse_auxiliary_tables={
+                    name: size for name, size in ch_sizes.items() if name not in tables
+                },
             ),
         )
-        save_json("benchmark/metadata.json", metadata)
-        save_json("benchmark/summary.json", summary)
+        if not resources["equal_engine_memory_limits"]:
+            metadata["limitations"].append(
+                "Memory budgets differ; not an equal-memory engine isolation test"
+            )
+        files = dict(executed_sql)
+        schema_path = ARTIFACTS / "benchmark/postgres_schema.sql"
+        if not reuse_mirror and schema_path.exists():
+            files["postgres_schema.sql"] = schema_path.read_bytes()
+        files["summary.json"] = json.dumps(summary, indent=2).encode()
         for filename, records in [("runs.csv", raw), ("summary.csv", summary)]:
-            with (ARTIFACTS / "benchmark" / filename).open("w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=list(records[0]))
-                writer.writeheader()
-                writer.writerows(records)
+            output = io.StringIO(newline="")
+            writer = csv.DictWriter(output, fieldnames=list(records[0]))
+            writer.writeheader()
+            writer.writerows(records)
+            files[filename] = output.getvalue().encode()
         lines = [
             "# Benchmark — measured results",
             "",
-            f"Pipeline: `{manifest['run_id']}`. {warmups} warm-ups + {runs} measured runs per engine/query.",
+            f"Pipeline: `{manifest['run_id']}`. Benchmark: `{benchmark_id}`.",
+            f"One parity query, {warmups} warm-ups and {runs} measured runs per engine/query.",
             "",
             "Same Gold rows and columns; full row hashes and all query outputs matched. Timings include client execute + fetch.",
             "",
@@ -301,12 +312,17 @@ def benchmark(runs=5, reuse_mirror=False):
             for r in summary
         ]
         lines += ["", "## Limitations", ""] + ["- " + v for v in metadata["limitations"]]
-        (ARTIFACTS / "benchmark/results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        files["results.md"] = ("\n".join(lines) + "\n").encode()
+        files["metadata.json"] = json.dumps(metadata, indent=2, default=str).encode()
+        receipt = publish_bundle(ARTIFACTS / "benchmark", benchmark_id, files)
+        metadata["publication"] = receipt["directory"]
+        return metadata
     except Exception as exc:
         save_json(
             "benchmark/metadata.json",
             dict(
                 status="failed",
+                benchmark_run=benchmark_id,
                 pipeline_run=manifest["run_id"],
                 error=str(exc),
                 finished_at=utc_now(),
@@ -314,6 +330,7 @@ def benchmark(runs=5, reuse_mirror=False):
         )
         raise
     finally:
-        ch.close()
-        pg.close()
-
+        if ch is not None:
+            ch.close()
+        if pg is not None:
+            pg.close()

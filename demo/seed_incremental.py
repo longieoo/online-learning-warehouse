@@ -1,4 +1,4 @@
-"""Tạo 10.000 lượt thi đến muộn trong dữ liệu giả lập, bằng tài khoản tác nghiệp."""
+"""Add up to 10,000 late-arriving synthetic quiz attempts using the source writer."""
 
 from argparse import ArgumentParser
 from contextlib import closing

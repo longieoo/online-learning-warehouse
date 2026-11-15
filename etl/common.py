@@ -22,7 +22,7 @@ ARTIFACTS = Path(os.getenv("DW_ARTIFACTS_DIR", str(ROOT / "artifacts")))
 def save_json(name, data):
     path = ARTIFACTS / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Mỗi writer có file tạm riêng để không ghi đè lẫn nhau.
+    # Each writer gets a private temporary file before atomic replacement.
     fd, temp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
@@ -50,34 +50,31 @@ def copy_frame(conn, table, frame):
 
 @contextmanager
 def project_lock(shared=False):
-    conn = staging_connect()
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        function = "pg_try_advisory_lock_shared" if shared else "pg_try_advisory_lock"
-        cur.execute(f"SELECT {function}(202210132024)")
-        if not cur.fetchone()[0]:
-            conn.close()
-            raise RuntimeError("Another project command is running; retry after it finishes")
-    try:
+    with closing(staging_connect()) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            function = "pg_try_advisory_lock_shared" if shared else "pg_try_advisory_lock"
+            cur.execute(f"SELECT {function}(202210132024)")
+            if not cur.fetchone()[0]:
+                raise RuntimeError("Another project command is running; retry after it finishes")
         yield
-    finally:
-        conn.close()
 
 
 def require_success():
-    # PostgreSQL là nguồn trạng thái bền vững. File JSON hỗ trợ đọc log và export.
+    # PostgreSQL is authoritative. A leftover JSON export must never make a
+    # fresh database appear ready after its volumes have been replaced.
     with closing(staging_connect()) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT manifest FROM staging.published_state WHERE singleton=true")
         row = cursor.fetchone()
         cursor.execute("SELECT 1 FROM staging.pipeline_runs WHERE phase='publishing' LIMIT 1")
         if cursor.fetchone():
-            raise RuntimeError("Kho dữ liệu đang phục hồi công bố. Hãy chạy pipeline rồi thử lại.")
+            raise RuntimeError(
+                "Warehouse publication requires recovery. Run the pipeline and retry."
+            )
         if row:
+            if row[0].get("status") != "success":
+                raise RuntimeError(
+                    "Published warehouse state is not successful; rerun the pipeline"
+                )
             return row[0]
-    path = ARTIFACTS / "pipeline.json"
-    if not path.exists():
-        raise RuntimeError("Run pipeline first")
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest["status"] != "success":
-        raise RuntimeError("Gold is unavailable: last pipeline did not succeed. Rerun pipeline.")
-    return manifest
+    raise RuntimeError("No published warehouse exists in PostgreSQL. Run a full pipeline first.")

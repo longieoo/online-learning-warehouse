@@ -3,6 +3,23 @@ from etl.schema_guard import normalize
 
 
 class DomainTests(unittest.TestCase):
+    def test_blank_required_text_and_nonpositive_identifiers_are_quarantined(self):
+        for column in ["full_name", "title", "city", "transaction_id"]:
+            with self.subTest(column=column):
+                self.assertEqual(normalize([column], ["text"], ["   "])[1], "ERR_EMPTY_VALUE")
+        for value in [0, -1]:
+            self.assertEqual(normalize(["user_id"], ["bigint"], [value])[1], "ERR_INVALID_DOMAIN")
+
+    def test_incomplete_cross_field_contracts_are_rejected_without_crashing(self):
+        for column, kind, value in [
+            ("charged_vnd", "bigint", 100),
+            ("valid_from", "timestamp without time zone", "2024-01-01"),
+        ]:
+            with self.subTest(column=column):
+                self.assertEqual(
+                    normalize([column], [kind], [value])[1], "ERR_SCHEMA_TYPE_MISMATCH"
+                )
+
     def test_invalid_numeric_domains_are_quarantined(self):
         for column, value in [
             ("total_questions", 0),

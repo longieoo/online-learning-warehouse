@@ -1,7 +1,7 @@
 """Consistent dashboard snapshots protected by a shared publication lock."""
 
 from contextlib import closing
-from datetime import date
+from datetime import date, datetime
 import calendar
 import pandas as pd
 from etl.common import ch_connect, staging_connect, project_lock, require_success
@@ -40,6 +40,19 @@ FRAME_COLUMNS = {
 }
 
 
+def validate_scope(start, end, categories):
+    """Reject invalid scopes before opening a database connection."""
+    if any(not isinstance(value, date) or isinstance(value, datetime) for value in (start, end)):
+        raise ValueError("Reporting boundaries must be calendar dates")
+    if not date(2022, 1, 1) <= start <= end <= date(2024, 12, 31):
+        raise ValueError("Choose an ordered date range inside the 2022–2024 calendar")
+    if isinstance(categories, (str, bytes)) or not categories:
+        raise ValueError("Select at least one course category")
+    if any(not isinstance(value, str) or not value.strip() for value in categories):
+        raise ValueError("Course categories must be nonempty strings")
+    return tuple(dict.fromkeys(categories))
+
+
 def comparison_period(start, end):
     """Same calendar dates one year earlier, only inside the supported calendar."""
     if start.year != end.year or start.year <= 2022:
@@ -56,10 +69,11 @@ def comparison_period(start, end):
 
 
 def snapshot(run_id, start, end, categories):
+    categories = validate_scope(start, end, categories)
     with project_lock(shared=True):
         manifest = require_success()
         if manifest["run_id"] != run_id:
-            raise RuntimeError("Gold vừa được cập nhật. Bấm Làm mới để đọc phiên bản mới.")
+            raise RuntimeError("The published snapshot changed. Refresh to read the new version.")
         parameters = dict(start=str(start), end=str(end), categories=tuple(categories))
         with closing(ch_connect()) as ch:
 
@@ -164,26 +178,6 @@ def snapshot(run_id, start, end, categories):
                     enrolled=int(prior_learning.enrolled),
                     completed=int(prior_learning.completed),
                 )
-        with closing(staging_connect()) as pg, pg.cursor() as cursor:
-            cursor.execute("""SELECT table_name,error_code,count(*) AS records,
-                count(*) FILTER(WHERE resolved_at IS NULL) AS open_records
-                FROM quarantine.quarantine_records GROUP BY 1,2 ORDER BY 3 DESC""")
-            quarantine = pd.DataFrame(
-                cursor.fetchall(), columns=["Bảng", "Mã lỗi", "Tổng", "Chưa xử lý"]
-            )
-            cursor.execute("""SELECT table_name,source_id,error_code,rejection_reason,detected_at,resolved_at
-                FROM quarantine.quarantine_records ORDER BY detected_at DESC LIMIT 50""")
-            recent_errors = pd.DataFrame(
-                cursor.fetchall(),
-                columns=["Bảng", "Khóa nguồn", "Mã lỗi", "Lý do", "Phát hiện", "Đã sửa"],
-            )
-            cursor.execute("""SELECT run_id,phase,started_at,finished_at,
-                manifest->>'mode' AS mode,manifest->>'seconds' AS seconds
-                FROM staging.pipeline_runs ORDER BY started_at DESC LIMIT 10""")
-            runs = pd.DataFrame(
-                cursor.fetchall(),
-                columns=["Run ID", "Trạng thái", "Bắt đầu", "Kết thúc", "Chế độ", "Giây"],
-            )
         return dict(
             manifest=manifest,
             finance=finance,
@@ -196,9 +190,44 @@ def snapshot(run_id, start, end, categories):
             quiz=quiz,
             instructors=instructors,
             cities=cities,
-            quarantine=quarantine,
-            recent_errors=recent_errors,
-            runs=runs,
+        )
+
+
+def operations_snapshot(run_id):
+    """Read control-plane status without scanning analytical fact tables."""
+    with project_lock(shared=True):
+        manifest = require_success()
+        if manifest["run_id"] != run_id:
+            raise RuntimeError("The published snapshot changed. Refresh to read the new version.")
+        with closing(staging_connect()) as pg, pg.cursor() as cursor:
+            cursor.execute("""SELECT table_name,error_code,count(*) AS records,
+                count(*) FILTER(WHERE resolved_at IS NULL) AS open_records
+                FROM quarantine.quarantine_records GROUP BY 1,2 ORDER BY 3 DESC,1,2""")
+            quarantine = pd.DataFrame(
+                cursor.fetchall(), columns=["Table", "Error code", "Total", "Open"]
+            )
+            cursor.execute("""SELECT table_name,source_id,error_code,rejection_reason,detected_at,resolved_at
+                FROM quarantine.quarantine_records ORDER BY detected_at DESC,table_name,source_id LIMIT 50""")
+            recent_errors = pd.DataFrame(
+                cursor.fetchall(),
+                columns=[
+                    "Table",
+                    "Source ID",
+                    "Error code",
+                    "Reason",
+                    "Detected at",
+                    "Resolved at",
+                ],
+            )
+            cursor.execute("""SELECT run_id,phase,started_at,finished_at,
+                manifest->>'mode' AS mode,manifest->>'seconds' AS seconds
+                FROM staging.pipeline_runs ORDER BY started_at DESC,run_id LIMIT 10""")
+            runs = pd.DataFrame(
+                cursor.fetchall(),
+                columns=["Run ID", "Phase", "Started at", "Finished at", "Mode", "Seconds"],
+            )
+        return dict(
+            manifest=manifest, quarantine=quarantine, recent_errors=recent_errors, runs=runs
         )
 
 
@@ -220,6 +249,9 @@ def options():
 
 def detail(run_id, kind, start, end, categories):
     """Optional drilldowns, retaining the same publication and filter contract."""
+    categories = validate_scope(start, end, categories)
+    if kind not in {"study", "movers"}:
+        raise ValueError("Unknown drilldown")
     with project_lock(shared=True):
         if require_success()["run_id"] != run_id:
             raise RuntimeError("Snapshot changed; refresh the portal")

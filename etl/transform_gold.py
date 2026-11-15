@@ -1,4 +1,4 @@
-"""Tạo kết nối ClickHouse tới các bảng Silver thực sự nằm trên PostgreSQL."""
+"""Expose PostgreSQL Silver tables to ClickHouse for candidate builds."""
 
 import os
 from contextlib import closing, contextmanager
@@ -27,7 +27,7 @@ def silver_bridge(ch):
         ch.command("DROP DATABASE IF EXISTS stage_bridge SYNC")
 
 
-# PostgreSQL lọc delta theo timestamp gốc. ClickHouse chỉ nhận những hàng thay đổi.
+# Pending journal revisions identify the Silver rows that actually changed.
 def prepare_delta(ch, fact, key):
     target = f"stage_bridge.delta_{fact}"
     ch.command(f"CREATE TABLE {target} AS stage_bridge.{fact} ENGINE=MergeTree ORDER BY {key}")

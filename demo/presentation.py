@@ -24,13 +24,25 @@ def icon(name):
 
 
 def ratio(numerator, denominator):
-    return 100 * float(numerator) / float(denominator) if denominator else None
+    numerator, denominator = float(numerator), float(denominator)
+    if not math.isfinite(numerator) or not math.isfinite(denominator) or denominator <= 0:
+        return None
+    return 100 * numerator / denominator
+
+
+def csv_bytes(frame):
+    """Preserve numeric values while neutralizing spreadsheet formulas in source text."""
+
+    def safe(value):
+        if isinstance(value, str) and value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
+            return "'" + value
+        return value
+
+    return frame.map(safe).to_csv(index=False).encode("utf-8-sig")
 
 
 def percent(value):
-    return (
-        "—" if value is None or not math.isfinite(value) else f"{value:.1f}".replace(".", ",") + "%"
-    )
+    return "—" if value is None or not math.isfinite(value) else f"{value:.1f}" + "%"
 
 
 def change(current, previous, points=False):
@@ -41,18 +53,14 @@ def change(current, previous, points=False):
     )
     if result is None or not math.isfinite(result):
         return None
-    return (
-        ("+" if result > 0 else "")
-        + f"{result:.1f}".replace(".", ",")
-        + (" đpt" if points else "%")
-    )
+    return ("+" if result > 0 else "") + f"{result:.1f}" + (" pp" if points else "%")
 
 
 def metrics(items):
     cards = []
     for item in items:
         delta = item.get("delta")
-        note = item.get("note", "Trong kỳ đã chọn")
+        note = item.get("note", "Selected period")
         badge = '<span class="delta">' + escape(delta) + "</span>" if delta else ""
         cards.append(
             '<div class="metric-card"><div class="metric-top"><span class="metric-label">'
@@ -83,9 +91,9 @@ def card_title(title, subtitle=None, tag=None):
     )
 
 
-def empty(message="Không có dữ liệu trong phạm vi đã chọn."):
+def empty(message="There are no observations in the selected scope."):
     st.markdown(
-        '<div class="empty-state"><b>Chưa có dữ liệu để hiển thị</b>' + escape(message) + "</div>",
+        '<div class="empty-state"><b>No observations to display</b>' + escape(message) + "</div>",
         unsafe_allow_html=True,
     )
 

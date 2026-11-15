@@ -10,7 +10,7 @@ services:
     ports: ["127.0.0.1:${PG_PORT:-55432}:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data", "./docker/init-databases.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro"]
     shm_size: 256mb
-    mem_limit: 2g
+    mem_limit: ${PG_MEMORY_LIMIT:-2g}
     cpus: ${DW_CPUS:-4}
     command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=32MB", "-c", "max_parallel_workers_per_gather=3"]
     healthcheck:
@@ -27,7 +27,7 @@ services:
       TZ: UTC
     ports: ["127.0.0.1:${CH_PORT:-58123}:8123"]
     volumes: ["clickhouse_data:/var/lib/clickhouse", "./docker/clickhouse.xml:/etc/clickhouse-server/config.d/resources.xml:ro"]
-    mem_limit: 3g
+    mem_limit: ${CH_MEMORY_LIMIT:-3g}
     cpus: ${DW_CPUS:-4}
     ulimits:
       nofile: {soft: 262144, hard: 262144}
@@ -58,9 +58,15 @@ services:
       DW_CPUS: ${DW_CPUS:-4}
       DW_MIN_SOURCE_ROWS: ${DW_MIN_SOURCE_ROWS:-5000000}
       DW_ARTIFACTS_DIR: ${DW_ARTIFACTS_DIR:-/app/artifacts}
+      DW_SCENARIO_PROJECT: ${DW_SCENARIO_PROJECT:-}
+      PG_MEMORY_LIMIT: ${PG_MEMORY_LIMIT:-2g}
+      CH_MEMORY_LIMIT: ${CH_MEMORY_LIMIT:-3g}
+      RUNNER_MEMORY_LIMIT: ${RUNNER_MEMORY_LIMIT:-1500m}
       TZ: UTC
-    mem_limit: 1500m
+    mem_limit: ${RUNNER_MEMORY_LIMIT:-1500m}
     cpus: ${DW_CPUS:-4}
+    init: true
+    security_opt: ["no-new-privileges:true"]
     depends_on:
       postgres: {condition: service_healthy}
       clickhouse: {condition: service_healthy}
@@ -84,9 +90,12 @@ services:
       DW_MIN_SOURCE_ROWS: ${DW_MIN_SOURCE_ROWS:-5000000}
       PYTHONPATH: /app
       DW_ARTIFACTS_DIR: ${DW_ARTIFACTS_DIR:-/app/artifacts}
+      DW_DASHBOARD_ALLOW_PIPELINE: ${DW_DASHBOARD_ALLOW_PIPELINE:-0}
     ports: ["127.0.0.1:${DASHBOARD_PORT:-8501}:8501"]
-    mem_limit: 1500m
+    mem_limit: ${DASHBOARD_MEMORY_LIMIT:-1500m}
     cpus: 2
+    init: true
+    security_opt: ["no-new-privileges:true"]
     depends_on:
       postgres: {condition: service_healthy}
       clickhouse: {condition: service_healthy}
@@ -99,9 +108,3 @@ services:
 volumes:
   postgres_data:
   clickhouse_data:
-
-
-
-
-
-

@@ -1,56 +1,80 @@
 # Runbook
 
-## Khởi động và cấu hình
+## Start and inspect
 
-Làm theo README từ thư mục gốc dự án. Docker Desktop cần ở chế độ Linux containers. Sao chép `.env.example` thành `.env` nếu muốn đổi project name, cổng và mật khẩu trước lần tạo volume đầu tiên. Thay mật khẩu sau khi volume đã có dữ liệu cần cập nhật role tương ứng trong PostgreSQL, không chỉ sửa env.
+Run commands from the repository root with Docker running Linux containers. Copy `.env.example` to `.env` before creating volumes if you want different ports, passwords or resource limits. Updating environment passwords after a database exists also requires updating its database roles; editing `.env` alone does not rotate existing credentials.
 
-Cổng mặc định PostgreSQL 55432, ClickHouse HTTP 58123 và portal 8501, chỉ bind 127.0.0.1. Nếu Windows chặn cổng, đặt PG_PORT=15432, CH_PORT=18123, DASHBOARD_PORT=18501 trong .env và chạy lại. Các service nội bộ vẫn dùng cổng PostgreSQL 5432 và ClickHouse 8123.
+```sh
+docker compose up -d --wait postgres clickhouse
+docker compose build runner dashboard
+docker compose run --rm runner python cli.py all
+docker compose --profile demo up -d --wait dashboard
+```
 
-```powershell
+The default source has 500,000 enrollments and more than 5.7 million rows. `all` initializes, generates only if empty, runs full ETL, exports reports and benchmarks. It takes longer than an ETL-only timing because it includes all these steps. Ports default to PostgreSQL 55432, ClickHouse HTTP 58123 and dashboard 8501, bound only to `127.0.0.1`.
+
+```sh
 docker compose ps
 docker compose logs --tail 80 postgres clickhouse dashboard
 docker compose run --rm runner python cli.py doctor
 ```
 
-`doctor` kiểm tra kết nối, vai trò nguồn chỉ đọc, staging không kết nối OLTP, trạng thái đã công bố và số lỗi chưa xử lý. Doctor không thay dữ liệu. `setup` được dùng khi khởi tạo hoặc nâng cấp schema điều khiển. Không chạy setup đồng thời với pipeline hay tác nghiệp nguồn.
+`doctor` reads connectivity, role boundaries, publication state and open quarantine. It does not fix data. `setup` initializes database contracts; do not run it concurrently with ingestion or source writes. Fresh volumes and existing volumes are different cases: an exported JSON file alone does not make new databases ready.
 
-## Lịch chạy gợi ý
+## Normal update cycle
 
-1. Chạy full đầu tiên và kiểm tra quality gate.
-2. Khi nguồn có thay đổi, chạy incremental. Giao dịch giữ mở có thể làm checkpoint chờ.
-3. Chạy reports sau khi công bố. Manifest có đường dẫn thư mục CSV, run ID, số dòng và hash.
-4. Chạy benchmark khi cần đo, ngoài giờ tác nghiệp. Có bước sao chép toàn Gold và đối chiếu hash, có thể tốn nhiều thời gian hơn truy vấn.
-5. Mở portal, bấm Làm mới để đọc bản mới. Bộ nhớ đệm tối đa 60 giây và gắn run ID.
+```sh
+docker compose run --rm runner python -m demo.seed_incremental
+docker compose run --rm runner python cli.py pipeline --mode incremental
+docker compose run --rm runner python cli.py reports
+```
 
-## Pipeline lỗi
+The first command deliberately inserts synthetic activity. Omit it when your source already contains the changes you want to process. Empty incremental runs scan Gold fingerprints before reuse, so they perform integrity work even when extraction finds no changes. A long open source transaction can defer newer committed changes; check source transaction age before assuming ingestion has stalled.
 
-Đọc `artifacts/pipeline.json`, file của run trong `artifacts/runs` và log runner. Dữ liệu lỗi có mã và payload trong quarantine. Gold đã công bố có thể vẫn dùng được dù lần thử gần nhất lỗi. Không tự sửa watermark, không xóa pending_changes hoặc source_versions.
+Open the dashboard and use **Refresh data** to load the latest committed publication. Dashboard requests read a coherent snapshot under a shared lock. Cached results are tied to the publication run. Pipeline execution from the browser is disabled by default; use the CLI for operational changes.
 
-```powershell
+## Failed ingestion or publication
+
+Inspect `artifacts/pipeline.json`, the matching file under `artifacts/runs`, and runner logs. The last attempt may be failed while an earlier committed Gold remains available. Do not manually advance checkpoints or delete pending changes/revision state.
+
+```sh
 docker compose run --rm runner python cli.py pipeline --mode incremental
 ```
 
-Lệnh trên phục hồi công bố dang dở trước khi nạp tiếp. Nếu báo UUID không khớp, dừng consumer và giữ `gold_build` cùng `staging.pipeline_runs`. Đối chiếu kế hoạch publication với `system.tables` để tìm thao tác ngoài pipeline. Không drop database tạm trước khi điều tra.
+Retry performs pending-publication recovery before new ingestion. If UUIDs do not match the recovery plan, preserve `gold_build` and `staging.pipeline_runs` for investigation. Do not drop candidate tables to suppress the error. SQL clients outside the project must avoid partial publication or cooperate with the project lock.
 
-Nếu lỗi contract hoặc đã tắt trigger, sửa setup/schema/mapping rồi chạy `pipeline --mode full`. Quality gate không đạt thì kiểm tra quality.json và nguồn. Dòng lỗi schema/miền giá trị bị cách ly. Lỗi tổng hợp, SCD2 hoặc quan hệ phức tạp có thể chặn cả lần công bố để tránh mất dữ liệu âm thầm.
+After a required source-column/type change, update schema contracts and mapping and run a full load. Additive fields outside the contract are ignored. A valid source correction resolves the corresponding rejection; an invalid update keeps the preceding clean Silver row. Failures in cross-table or aggregate checks block candidate publication.
 
-## Sao lưu và dừng
+## Benchmark
 
-Sao lưu cả `learning_oltp` lẫn `dwh_staging` bằng pg_dump và Gold bằng cơ chế backup ClickHouse hoặc bản snapshot volume được tạo khi service dừng. Cần khôi phục checkpoint/control state cùng Gold tương ứng. Chưa có bài kiểm thử phục hồi backup trong phiên bản này.
+```sh
+docker compose run --rm runner python cli.py benchmark --runs 5 --warmups 2
+```
 
-```powershell
+This creates/replaces only the comparison mirror, verifies complete data parity and measures queries serially. It is not a source write. `--reuse-mirror` avoids the copy only when the existing mirror passes parity. Even `--warmups 0` executes an untimed parity query, so it is not a cold-cache experiment. See [benchmark methodology](benchmark.md).
+
+`artifacts/benchmark/metadata.json` describes the latest attempt, including failure. `latest.json` points only to a complete successful bundle in `history/<benchmark_run>`. Use that pointer and its SHA-256 list when consuming multiple result files. Compatibility CSV/Markdown paths remain convenient individual copies; they are not a transaction across all files.
+
+## Verify safely
+
+```sh
+python scripts/verify.py
+```
+
+Only Python's standard library and Docker are needed on the host. Verification allocates a unique Compose project, unused loopback ports and isolated artifacts. It refuses to reuse existing project resources. The suite initializes 5,000 enrollments, runs ETL/reports/benchmark, offline and live integration checks, deliberate fault scenarios and dashboard reconciliation. It then stops only its own project and preserves its volumes and logs. `scripts/verify.ps1` is a compatibility wrapper on Windows.
+
+Deliberate failure scenarios require the explicit test-project marker and matching artifact path, as well as the opt-in flag. They reject an ordinary main project. Never repoint their connection variables to shared data. A small fresh-volume smoke proves the tested scenarios, not full-scale throughput or production availability.
+
+## Stop, retain and restore
+
+```sh
 docker compose stop
-# Khởi động lại, giữ nguyên volume
 docker compose up -d --wait postgres clickhouse
 docker compose --profile demo up -d --wait dashboard
 ```
 
-`docker compose down` giữ volume. Lệnh `down -v` xóa toàn bộ dữ liệu dự án và không nằm trong quy trình thông thường.
+These commands preserve volumes. `down -v` destroys project data and is not part of normal operation. Keep both source and staging/control backups aligned with the corresponding Gold state. Back up PostgreSQL databases with `pg_dump` and Gold through supported ClickHouse backups or consistent stopped-volume snapshots. This repository does not yet qualify a full backup restoration process; do not treat crash-recovery tests as backup-restore evidence.
 
-## Kiểm thử độc lập
+## Evidence and known boundaries
 
-`scripts/verify.ps1` tạo project Docker riêng, sinh 5.000 ghi danh, chạy toàn luồng, unit/integration và các tình huống lỗi. Project kiểm thử dùng cổng khác và `DW_MIN_SOURCE_ROWS=0`. Đây là smoke test, không thay thế nghiệm thu hơn 5 triệu dòng. Test lỗi có quyền ghi/xóa dữ liệu giả lập và chỉ chạy khi `DW_ALLOW_SCENARIOS=1`.
-
-Bằng chứng được lưu có chọn lọc tại `docs/verification/`. Các artifacts runtime được tạo lại khi chạy dự án. Các số đo v2 ngày 04/11/2026 nằm trong history, không phải số đo mới. Gói bàn giao có MANIFEST.json với SHA-256 cho từng file. Không chứa .env, cache, database volume hoặc zip lồng nhau. Công cụ tạo gói được giữ trong workspace gốc.
-
-
+Versioned summaries live in [verification](verification/README.md). Runtime artifacts, caches, credentials and database volumes stay outside Git. Historical large-data measurements retain their original dates and resource budgets; current upgrade smoke evidence has its own scope and timestamps. Local-host credentials and shared ClickHouse roles are intended for a learning demo, not public network deployment.

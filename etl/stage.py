@@ -155,6 +155,11 @@ def process_batch(writer, table, columns, types, rows, full):
     deleted = [source_id for source_id, (_, op) in operations.items() if op == "DELETE"]
     if deleted:
         writer.execute(f"DELETE FROM silver.{table} WHERE {key}=ANY(%s)", (deleted,))
+        writer.execute(
+            """UPDATE quarantine.quarantine_records SET resolved_at=now()
+            WHERE table_name=%s AND source_id=ANY(%s) AND resolved_at IS NULL""",
+            (table, deleted),
+        )
     updates = ",".join(f"{column}=EXCLUDED.{column}" for column in columns[1:])
     writer.execute(f"""INSERT INTO silver.{table} SELECT * FROM batch_{table}
         ON CONFLICT ({key}) DO UPDATE SET {updates}""")

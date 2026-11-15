@@ -1,6 +1,6 @@
 """Build, validate and publish Gold with durable crash recovery."""
 
-import resource
+import sys
 import time
 import uuid
 from contextlib import closing
@@ -10,6 +10,18 @@ from etl.watermark import published, record_run, commit_publication
 from etl.common import ROOT, ch_connect, save_json, utc_now
 from etl.stage import stage_source
 from etl.transform_gold import load_gold_rows, silver_bridge
+from etl.integrity import fingerprints
+
+
+def peak_rss_mib():
+    """Return the process high-water mark, or None when the OS does not expose it."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    maximum = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    return round(maximum / divisor, 2)
 
 
 def statements(path):
@@ -47,15 +59,16 @@ def gold_intact(ch, previous):
             return False
     if not previous.get("gold_uuids"):
         return False
-    for table, fingerprint in previous["fingerprints"].items():
-        if ch.query(f"SELECT count() FROM gold.{table}").first_row[0] != fingerprint[0]:
-            return False
-    return True
+    # UUIDs and row counts alone cannot detect an out-of-band UPDATE with the
+    # same cardinality. Verify every column before reusing existing partitions.
+    return fingerprints(ch) == previous.get("fingerprints")
 
 
 def pipeline(mode="full"):
     from etl.validate import validate
 
+    if mode not in ("full", "incremental"):
+        raise ValueError("Pipeline mode must be full or incremental")
     started = time.perf_counter()
     manifest = dict(
         run_id=uuid.uuid4().hex, status="running", mode=mode, started_at=utc_now(), version=3
@@ -89,7 +102,12 @@ def pipeline(mode="full"):
                     )
                 }
             )
-            intact = gold_intact(ch, previous)
+            # A full build cannot reuse existing partitions, so avoid an
+            # unnecessary scan of the old warehouse in that path.
+            intact = (
+                mode == "incremental" and not staged["needs_full"] and gold_intact(ch, previous)
+            )
+            manifest["previous_gold_intact"] = intact
             if (
                 mode == "incremental"
                 and not staged["needs_full"]
@@ -156,7 +174,7 @@ def pipeline(mode="full"):
                 status="success",
                 finished_at=utc_now(),
                 seconds=round(time.perf_counter() - started, 3),
-                peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 2),
+                peak_rss_mib=peak_rss_mib(),
             )
             commit_publication(manifest, staged)
             committed = True

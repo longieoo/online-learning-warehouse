@@ -1,21 +1,52 @@
-name: warehouse-smoke
+name: Warehouse checks
 on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+concurrency:
+  group: warehouse-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  smoke:
+  static:
+    name: Lint and offline unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock.txt
+            demo/requirements.lock.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements.lock.txt -r demo/requirements.lock.txt -r requirements-dev.txt
+      - run: python -m pip check
+      - run: python scripts/check.py --fail-on-skip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: offline-checks
+          path: artifacts/code-checks.json
+          if-no-files-found: warn
+  smoke:
+    name: Fresh-volume integration and recovery
+    needs: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
-      COMPOSE_PROJECT_NAME: learning-dw-ci
-      DW_MIN_SOURCE_ROWS: 0
       DW_CPUS: 2
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose build runner dashboard
-      - run: docker compose up -d --wait postgres clickhouse
-      - run: docker compose run --rm runner python cli.py all --enrollments 5000 --runs 3
-      - run: docker compose run --rm runner python -m unittest discover -s tests -v
-      - run: docker compose run --rm -e DW_ALLOW_SCENARIOS=1 runner python -m tests.scenarios
-      - run: docker compose run --rm dashboard python -m tests.dashboard_check
-      - if: always()
-        run: docker compose logs --tail 80
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/verify.py --project learning-dw-smoke-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolated-warehouse-evidence
+          path: artifacts/verification/
+          if-no-files-found: warn
+          retention-days: 14
 

@@ -4,6 +4,7 @@ import time
 import os
 from contextlib import closing
 from etl.common import ch_connect, staging_connect, require_success, save_json, utc_now
+from etl.integrity import fingerprints as content_fingerprints
 
 FACTS = {
     "enrollments": ("enrollment_id", "enrolled_at", "enrolled_date_sk"),
@@ -14,6 +15,8 @@ FACTS = {
 
 
 def validate(ch=None, expected=None, require_ready=True, database="gold"):
+    if database not in ("gold", "gold_build"):
+        raise ValueError("Validation database must be gold or gold_build")
     if ch is None:
         from etl.transform_gold import silver_bridge
 
@@ -292,14 +295,8 @@ def validate(ch=None, expected=None, require_ready=True, database="gold"):
             scalar("SELECT sum(enrollments) FROM gold.mv_course_completion_stats"),
             expected["enrollments"],
         )
-        # Order-independent fingerprints across EVERY column, including nullable values.
-        for table in list(dimensions) + ["fact_" + t for t in FACTS]:
-            cols = [r[0] for r in query(f"DESCRIBE TABLE gold.{table}").result_rows]
-            expr = "cityHash64(toJSONString(tuple(" + ",".join(cols) + ")))"
-            row = query(
-                f"SELECT count(), sum({expr}), groupBitXor({expr}) FROM gold.{table}"
-            ).first_row
-            fingerprints[table] = list(row)
+        # Order-independent fingerprints across every column, including NULLs.
+        fingerprints = content_fingerprints(ch, database)
         result = dict(
             status="success",
             checked_at=utc_now(),

@@ -1,6 +1,7 @@
 """Dashboard regression checks against rendered Streamlit pages and Silver totals."""
 
 import json
+import os
 from datetime import date
 from contextlib import closing
 from streamlit.testing.v1 import AppTest
@@ -31,19 +32,26 @@ check("overview renders four interactive charts", len(app.get("plotly_chart")) =
 for page in app.radio[0].options:
     app.radio[0].set_value(page).run()
     clean(app)
+    if page == "Quality & operations":
+        check("operations view contains no analytical plots", len(app.get("plotly_chart")) == 0)
+        if os.getenv("DW_DASHBOARD_ALLOW_PIPELINE", "0") != "1":
+            check(
+                "dashboard pipeline control is disabled without explicit opt-in",
+                not any(item.label == "Run incremental load" for item in app.button),
+            )
 check("all six navigation pages render")
-app.radio[0].set_value("Tổng quan").run()
+app.radio[0].set_value("Overview").run()
 app.multiselect[0].set_value(["Data"]).run()
 clean(app)
 check("category filter preserves a working overview", len(app.get("plotly_chart")) == 4)
-widget(app.selectbox, "revenue_grain").set_value("Quý").run()
+widget(app.selectbox, "revenue_grain").set_value("Quarter").run()
 clean(app)
 spec = json.loads(app.get("plotly_chart")[0].proto.spec)
 check(
-    "quarterly view aggregates twelve monthly points to four quarters",
+    "quarterly view groups the latest year into four calendar quarters",
     len(spec["data"][0]["x"]) == 4,
 )
-app.radio[0].set_value("Đề thi").run()
+app.radio[0].set_value("Quizzes").run()
 clean(app)
 spec = json.loads(app.get("plotly_chart")[0].proto.spec)
 check(
@@ -57,7 +65,7 @@ widget(app.text_input, "quiz_search").set_value("").run()
 widget(app.checkbox, "study_detail").check().run()
 clean(app)
 check("study score drilldown loads without hidden query errors")
-app.radio[0].set_value("Thị trường").run()
+app.radio[0].set_value("Markets").run()
 widget(app.checkbox, "mover_detail").check().run()
 clean(app)
 check("historical mover drilldown loads")
@@ -65,17 +73,17 @@ app.multiselect[0].set_value([]).run()
 clean(app)
 check(
     "empty category selection does not imply zero observations",
-    any("Chọn ít nhất một lĩnh vực" in item.value for item in app.markdown),
+    any("Select at least one course category" in item.value for item in app.markdown),
 )
-next(item for item in app.button if item.label == "Đặt lại").click().run()
+next(item for item in app.button if item.label == "Reset").click().run()
 clean(app)
 check(
     "reset restores latest year and all categories",
     widget(app.selectbox, "period").value == "2024" and len(app.multiselect[0].value) == 5,
 )
-widget(app.selectbox, "period").set_value("Tùy chọn").run()
+widget(app.selectbox, "period").set_value("Custom dates").run()
 widget(app.date_input, "custom_dates").set_value((date(2024, 12, 31), date(2024, 12, 31))).run()
-for page in ["Tổng quan", "Tài chính", "Học tập", "Đề thi", "Thị trường"]:
+for page in ["Overview", "Finance", "Learning", "Quizzes", "Markets"]:
     app.radio[0].set_value(page).run()
     clean(app)
 check("empty custom day renders safely on all analytical pages")

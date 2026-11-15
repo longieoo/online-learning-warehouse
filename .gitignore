@@ -1,8 +1,15 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 .venv/
 
 artifacts/
 .ruff_cache/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+*.log
 

@@ -1,4 +1,4 @@
-"""Kiểm tra hợp đồng cột và phân loại các dòng trước khi ghi staging."""
+"""Validate row contracts and normalize values before writing Silver."""
 
 import re
 from datetime import datetime, timezone
@@ -6,6 +6,17 @@ from etl.validator import validate_row
 
 
 def normalize(columns, types, values):
+    if (
+        not columns
+        or len(columns) != len(types)
+        or len(columns) != len(values)
+        or len(set(columns)) != len(columns)
+    ):
+        return (
+            None,
+            "ERR_SCHEMA_TYPE_MISMATCH",
+            "Column names, types and values must have matching lengths and unique names",
+        )
     row = dict(zip(columns, values))
     try:
         for col, kind in zip(columns, types):
@@ -24,6 +35,8 @@ def normalize(columns, types, values):
                 parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
                 if parsed.tzinfo is not None:
                     parsed = parsed.astimezone(timezone.utc)
+                elif kind == "timestamp with time zone":
+                    parsed = parsed.replace(tzinfo=timezone.utc)
                 if kind == "timestamp without time zone":
                     parsed = parsed.replace(tzinfo=None)
                 row[col] = parsed

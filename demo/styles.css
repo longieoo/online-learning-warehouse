@@ -1,5 +1,5 @@
 /* Local design system. Streamlit widgets retain keyboard and screen-reader behavior. */
-:root {--ink:#18253d;--muted:#7b879b;--blue:#4f63d9;--line:#e8ecf3;--surface:#fff;--canvas:#f4f6fb}
+:root {--ink:#18253d;--muted:#617089;--blue:#4f63d9;--line:#e8ecf3;--surface:#fff;--canvas:#f4f6fb}
 html,body,[class*="css"],.stApp {font-family:Inter,"Segoe UI",Arial,sans-serif}
 .stApp {background:var(--canvas)}
 .block-container {max-width:1560px;padding:2.5rem 2.4rem 2rem}
@@ -50,16 +50,16 @@ h4 {font-size:13px!important;font-weight:600!important}
 .metrics-grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px;margin:0 0 4px}
 .metric-card {background:white;border:1px solid var(--line);border-radius:12px;padding:17px 18px 15px;box-shadow:0 2px 6px #1a294404;min-width:0}
 .metric-top {display:flex;justify-content:space-between;align-items:center;gap:8px}
-.metric-label {font-size:12px;color:#76839a;font-weight:500;line-height:1.35}
+.metric-label {font-size:12px;color:#607086;font-weight:500;line-height:1.35}
 .metric-icon {color:#6075dc;background:#f0f3ff;border-radius:7px;width:28px;height:28px;display:grid;place-items:center;flex-shrink:0}
 .metric-icon svg {width:15px;height:15px}
 .metric-value {font-size:28px;font-weight:700;letter-spacing:-.9px;line-height:1.2;color:var(--ink);margin:9px 0 11px;white-space:nowrap}
-.metric-bottom {font-size:10px;min-height:17px;display:flex;gap:7px;align-items:center;flex-wrap:wrap;color:#8c97a9}
+.metric-bottom {font-size:10px;min-height:17px;display:flex;gap:7px;align-items:center;flex-wrap:wrap;color:#66758b}
 .delta {display:inline-block;background:#eef1fc;color:#5268bb;padding:2px 5px;border-radius:4px;font-weight:600;font-size:10px;white-space:nowrap}
 .delta-neutral {background:#f0f2f6;color:#6a768b}
 .card-title {display:flex;justify-content:space-between;align-items:center;gap:10px;margin:1px 0 5px}
 .card-title h3 {margin:0!important;color:var(--ink)}
-.card-subtitle {font-size:11px;color:#8a95a8;margin:0 0 4px;line-height:1.5}
+.card-subtitle {font-size:11px;color:#66758b;margin:0 0 4px;line-height:1.5}
 .card-tag {font-size:10px;color:#7685a0;background:#f4f6fa;border:1px solid #e8edf4;padding:3px 7px;border-radius:5px;white-space:nowrap}
 [data-testid="stPlotlyChart"] {border-radius:0!important}
 [data-testid="stDataFrame"] {border:1px solid var(--line);border-radius:8px;overflow:hidden}

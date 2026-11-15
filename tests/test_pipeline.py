@@ -36,6 +36,8 @@ class TransformTests(unittest.TestCase):
 
 
 class WarehouseIntegrationTests(unittest.TestCase):
+    integration = True
+
     @classmethod
     def setUpClass(cls):
         cls.ch = ch_connect()

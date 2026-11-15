@@ -1,114 +1,141 @@
 # Online Learning Warehouse
 
-Kho dữ liệu học trực tuyến sử dụng PostgreSQL, Python và ClickHouse. Dự án mô phỏng luồng từ giao dịch nguồn đến mô hình sao, kiểm tra chất lượng, báo cáo SQL và dashboard tương tác.
+[![Warehouse checks](https://github.com/longieoo/online-learning-warehouse/actions/workflows/smoke.yml/badge.svg)](https://github.com/longieoo/online-learning-warehouse/actions/workflows/smoke.yml)
 
-Dữ liệu được sinh bằng Faker/NumPy, trải trong giai đoạn 2022–2024. Đây là dự án học tập chạy cục bộ bằng Docker, không sử dụng dữ liệu học viên thật.
+A PostgreSQL-to-ClickHouse warehouse for exploring course revenue, enrollments, learning activity and assessment results. It includes incremental ingestion, historical learner attribution, a fail-closed quality gate, recoverable publication, SQL reports and an English Streamlit dashboard.
 
-![Dashboard tổng quan](docs/images/dashboard-desktop.jpg)
+The project runs locally with Docker and generates its own synthetic data. It is a runnable learning and portfolio project; it contains no real learner records.
 
-## Dự án giải quyết gì?
+![Revenue and enrollment overview](docs/images/dashboard-overview.jpg)
 
-Hệ thống trả lời các câu hỏi về doanh thu, giảm giá và hoàn tiền, ghi danh và hoàn thành khóa học, kết quả quiz, hiệu quả giảng viên và địa lý học viên tại thời điểm giao dịch.
+## What you can explore
 
-Gold gồm 4 fact và 7 dimension. Lịch sử học viên dùng SCD Type 2; ngày ghi danh và ngày hoàn thành dùng chung dimension ngày. Các báo cáo kết hợp nhiều fact bằng cách tổng hợp về cùng grain trước khi join.
+- Revenue before and after discounts and refunds, by month, category, instructor and payment method.
+- Enrollment cohorts and completion rates, with explicit date and denominator definitions.
+- Completed lessons, time spent and quiz attempts without confusing activity counts with distinct learners.
+- Learner geography at the time of an event, including changes of address.
+- Publication history, unresolved rejected records and quality results.
+
+The analytical model is a Galaxy schema: **four fact tables and seven conformed dimensions**. Individual facts keep their own grain; combined reports aggregate separately before joining. [Architecture](docs/architecture.md) explains the model and its boundaries.
 
 ```mermaid
 flowchart LR
-    O[(PostgreSQL OLTP)] --> J[Change journal]
-    O --> E[Python ETL]
-    J --> E
-    E --> S[(PostgreSQL Silver)]
-    E --> Q[Quarantine]
-    S --> B[Gold ứng viên]
-    B --> V{Quality gate}
-    V --> G[(ClickHouse Gold)]
-    G --> D[Streamlit dashboard]
-    G --> R[10 báo cáo SQL]
-    G --> M[PostgreSQL mirror / benchmark]
+  O[(PostgreSQL OLTP)] --> J[Transactional change journal]
+  O --> E[Python ingestion]
+  J --> E
+  E --> Q[(Quarantine)]
+  E --> S[(PostgreSQL Silver)]
+  S --> B[ClickHouse candidate]
+  B --> G{Quality gate}
+  G -->|pass| P[Recoverable publication]
+  P --> W[(ClickHouse Gold)]
+  W --> D[Streamlit dashboard]
+  W --> R[10 SQL reports]
+  W --> C[Equivalent PostgreSQL benchmark]
 ```
 
-## Chạy dự án
+## Run locally
 
-Yêu cầu Docker Desktop với Linux containers và Docker Compose. Chạy lệnh từ thư mục gốc repository.
+You need Docker with Linux containers and Docker Compose. Run commands from the repository root. The dashboard is available at [localhost:8501](http://localhost:8501).
 
-```bash
+```sh
 docker compose up -d --wait postgres clickhouse
 docker compose build runner dashboard
 docker compose run --rm runner python cli.py all
 docker compose --profile demo up -d --wait dashboard
 ```
 
-Dashboard mở tại [localhost:8501](http://localhost:8501). Lệnh `all` khởi tạo schema và role, sinh dữ liệu khi nguồn còn trống, chạy full ETL, xuất báo cáo và benchmark. Mặc định có 500.000 lượt ghi danh và hơn 5 triệu dòng nguồn. Lần đầu cần vài phút, tùy cấu hình máy.
+The default generator creates **500,000 enrollments and 5,722,103 source rows** across 2022–2024. `all` initializes schemas and roles, generates only when the source is empty, runs a full load, exports reports and benchmarks both engines. It can take several minutes, depending on the host. Source generation is create-once; repeating `all` reuses populated source data.
 
-Sao chép `.env.example` thành `.env` nếu cần đổi cổng hoặc thông tin đăng nhập trước khi tạo volume. Mật khẩu mặc định chỉ dùng cho demo localhost. Không commit `.env`.
+For a smaller first run, choose the following command **instead of** the default `all`, on a fresh project:
 
-## Nạp tăng dần
-
-```bash
-docker compose run --rm runner python -m demo.seed_incremental
-docker compose run --rm runner python cli.py pipeline --mode incremental
-docker compose run --rm runner python cli.py doctor
+```sh
+docker compose run --rm -e DW_MIN_SOURCE_ROWS=0 runner python cli.py all --enrollments 5000 --runs 3
 ```
 
-Journal ghi insert, update và delete trong cùng giao dịch nguồn. ETL dùng snapshot, checkpoint theo transaction ID và revision từng khóa để xử lý commit muộn và tránh replay phiên bản cũ. Dòng không hợp lệ được cách ly; cập nhật sai giữ lại phiên bản sạch trước đó.
+Copy [.env.example](.env.example) to `.env` before creating volumes to customize ports, credentials or CPU/memory limits. Default passwords are local-demo credentials. Host ports bind only to loopback. See [security](SECURITY.md) before considering any network deployment.
 
-Gold được dựng và kiểm tra trước khi công bố. Kế hoạch UUID từng bảng được lưu trong PostgreSQL để phục hồi nếu tiến trình dừng giữa lúc đổi bảng. Checkpoint chỉ được xác nhận cùng manifest thành công.
+## Update data and inspect results
+
+```sh
+# Optional: deliberately add synthetic changes to the source.
+docker compose run --rm runner python -m demo.seed_incremental
+
+# Process committed changes, including updates and deletes.
+docker compose run --rm runner python cli.py pipeline --mode incremental
+docker compose run --rm runner python cli.py doctor
+docker compose run --rm runner python cli.py reports
+```
+
+Invalid new records are quarantined. Invalid updates retain the last clean version. Source transaction checkpoints and per-key revisions handle late commits and stale replay. A durable publication plan allows a retry to recover after interruption during table exchange.
+
+An empty incremental run verifies Gold content before reuse. This detects same-count corruption; it also means an empty run does meaningful integrity work. PostgreSQL stores authoritative publication state, rather than relying on a leftover JSON file.
+
+Reports are exported into `artifacts/reports/<export_id>/` with a complete-set manifest, row counts and SHA-256 hashes. Runtime outputs and database volumes stay outside Git.
 
 ## Dashboard
 
-Sáu trang gồm tổng quan, tài chính, học tập, đề thi, thị trường, chất lượng và vận hành. Có bộ lọc năm/ngày/lĩnh vực, so sánh cùng kỳ, biểu đồ phân rã doanh thu, tìm kiếm đề thi và xuất CSV.
+Six pages cover Overview, Finance, Learning, Quizzes, Markets, and Quality & operations. They include calendar/category filters, prior-period comparisons, readable rankings, quiz search and CSV downloads. Empty selections and unavailable denominators are displayed explicitly.
 
-Năm mới nhất hiển thị đến ngày ghi danh cuối cùng có trong nguồn. Chọn Toàn kỳ hoặc Tùy chọn để xem các sự kiện học tập sau ngày đó. Tỷ lệ hoàn thành được tính theo cohort ghi danh tại bản dữ liệu hiện tại.
+The latest-year preset ends at the last enrollment date in the source. Use **All time** or a custom interval to include later learning events. Completion rates describe the selected enrollment cohort at the current snapshot, not a historical daily progression. Amounts use integer VND; event times use UTC.
 
-![Phân tích đề thi](docs/images/dashboard-exams.jpg)
+The operations page reads control state without running analytical queries. Browser-triggered pipeline execution is disabled by default; the CLI remains the normal operator entry point. CSV exports neutralize formula-like source text while preserving numeric values.
 
-## Kiểm thử và kết quả
+![Assessment performance and quiz search](docs/images/dashboard-quizzes.jpg)
 
-```bash
-docker compose run --rm runner python -m unittest discover -s tests -v
-docker compose run --rm dashboard python -m tests.dashboard_check
+## Verify the complete workflow
+
+```sh
+python scripts/verify.py
 ```
 
-Trên Windows, `scripts/verify.ps1` tạo project Docker riêng và chạy smoke test từ volume trống, gồm 5.000 ghi danh, ETL, báo cáo, benchmark và các tình huống lỗi.
+The host command uses only Python's standard library plus Docker. It creates a **new isolated Compose project**, allocates free ports, starts from empty volumes and runs:
 
-Kết quả ghi nhận ngày 10/11/2026 trên dữ liệu giả lập cục bộ:
+1. Source generation, full ETL and quality checks.
+2. All ten reports and seven equivalent benchmark query pairs.
+3. Offline and database-backed integration tests.
+4. Late commits, schema drift, quarantine, deletes, quality failure and crash recovery scenarios.
+5. Dedicated dashboard unit checks and live UI/Silver reconciliation.
 
-| Hạng mục | Kết quả |
+The verifier refuses to reuse project resources, stops only its own services, and preserves its volumes and per-step logs. Deliberate failure scenarios require matching isolation markers. `scripts/verify.ps1` delegates to the same workflow on Windows.
+
+For development, install the version-pinned dependencies in a virtual environment and run the strict offline gate:
+
+```sh
+python -m pip install -r requirements.lock.txt -r demo/requirements.lock.txt -r requirements-dev.txt
+python scripts/check.py --fail-on-skip
+```
+
+CI separates lint/offline tests from the fresh-volume integration/recovery job and uploads evidence for failed as well as successful runs. [Verification records](docs/verification/README.md) distinguish current upgrade checks from the historical large-data experiment. A small smoke run is not a production load test.
+
+## Benchmark fairly
+
+```sh
+docker compose run --rm runner python cli.py benchmark --runs 5 --warmups 2
+```
+
+The benchmark verifies serving data against its committed publication, copies the same eleven Gold tables to PostgreSQL, checks full-row SHA-256 and query-result multisets, then alternates which engine runs first. Raw samples, medians, spread, executed SQL and resource configuration are published as a complete immutable bundle. `artifacts/benchmark/latest.json` points to the latest successful set; `metadata.json` describes the latest attempt, including failure.
+
+Storage comparison covers the same eleven tables and records auxiliary ClickHouse summaries separately. PostgreSQL includes indexes; ClickHouse active-part bytes include storage metadata. CPU quotas are shared-host limits. Engine RAM limits can differ, and neither query CPU nor query peak RAM is measured. See [benchmark methodology](docs/benchmark.md) for interpretation and equal-memory configuration.
+
+## Repository guide
+
+| Path | Contents |
 |---|---|
-| Dữ liệu sau các lần thêm sự kiện thử nghiệm | 5.762.103 dòng nguồn |
-| Quality gate | 123 kiểm tra đạt |
-| Unit/integration | 12 test đạt |
-| Dashboard | 13 kiểm tra đạt, có đối soát độc lập với Silver |
-| Hồi quy trên môi trường riêng | 15 kiểm tra đạt, gồm late commit, delete và phục hồi sau crash |
-| Benchmark | Toàn bộ dòng 11 bảng và kết quả 7 truy vấn khớp giữa hai engine |
-| Full / incremental 10.000 dòng / lần rỗng | 205,439 s / 12,543 s / 0,806 s |
+| `oltp/` | Source schema, transactional journal and deterministic generator |
+| `etl/` | Contracts, validation, Silver, incremental state, Gold publication and recovery |
+| `dw/ddl/` | Gold schema, history mapping and aggregate feeds |
+| `analytics/` | Ten analytical queries and complete CSV-set export |
+| `benchmark/` | Equivalent SQL, parity, timing and coherent evidence publication |
+| `demo/` | English dashboard, data access, charts and presentation |
+| `tests/` | Offline, database, UI and destructive isolated regressions |
+| `scripts/` | Strict checks and safe cross-platform verification |
+| `docs/` | Architecture, mapping, dictionary, operations and dated evidence |
 
-Các số đo trên là kết quả cục bộ đã lưu, không phải cam kết hiệu năng. Xem [bằng chứng kiểm tra](docs/verification/) và [benchmark](docs/verification/benchmark.md). GitHub Actions chạy smoke test nhỏ; kết quả CI được theo dõi riêng với các số đo này.
+Start with the [runbook](docs/runbook.md), [source-to-target mapping](docs/mapping.md), [data dictionary](docs/data_dictionary.md) or [contribution guide](CONTRIBUTING.md).
 
-## Cấu trúc repository
+## Scope and remaining limits
 
-```text
-oltp/         Schema nguồn và generator
-etl/          Extract, validate, staging, publication và recovery
-dw/ddl/       DDL và mapping SQL sang Gold
-analytics/    10 báo cáo và bộ xuất CSV
-benchmark/    SQL đối chiếu và đo hai engine
-demo/         Dashboard và truy vấn phục vụ giao diện
-tests/        Unit, integration và regression scenarios
-docker/       Cấu hình PostgreSQL và ClickHouse
-docs/         Kiến trúc, mapping, dictionary, runbook và bằng chứng
-scripts/      Kiểm tra mã và smoke test độc lập
-```
+The calendar is fixed to 2022–2024 and Gold event timestamps have second precision. Long source transactions can delay incremental ingestion; journal retention is manual. Publication is atomic per table, with cooperative locks and recovery, not a distributed database transaction. External SQL readers must honor the publication boundary.
 
-Artifacts runtime được tạo trong `artifacts/`, không đưa vào Git. Repository không chứa database volume, cache, file ZIP lồng nhau hoặc bộ dữ liệu hàng triệu dòng; generator tạo lại dữ liệu khi chạy.
-
-## Tài liệu
-
-- [Kiến trúc và cơ chế phục hồi](docs/architecture.md)
-- [Source-to-target mapping](docs/mapping.md)
-- [Data dictionary](docs/data_dictionary.md)
-- [Runbook](docs/runbook.md)
-
-## Giới hạn
-
-Kỳ ngày cố định 2022–2024; sự kiện Gold có độ chính xác giây. Journal chưa tự động retention và giao dịch nguồn mở lâu có thể trì hoãn nạp. Công bố chỉ nguyên tử từng bảng; consumer trong dự án dùng khóa đọc, SQL client ngoài dự án cần tránh cửa sổ công bố. Portal chưa có xác thực. Chưa nghiệm thu tải production hoặc phục hồi backup. Mục tiêu incremental có dữ liệu trong 1–2 giây chưa đạt.
+The local dashboard has no authentication and still shares the ClickHouse demo account with ETL. Its read-only UI is not database authorization. Backup restoration, multi-user production load, high availability and equal-resource engine qualification remain separate exercises. Historical timings are evidence for their dated runs, not performance guarantees for the upgraded implementation.

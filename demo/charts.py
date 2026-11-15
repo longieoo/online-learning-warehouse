@@ -1,19 +1,22 @@
 """Consistent interactive figures for the learning warehouse portal."""
 
 import pandas as pd
+import math
 import plotly.graph_objects as go
 
 BLUE = "#4F63D9"
 INK = "#18253D"
-MUTED = "#7D899D"
+MUTED = "#617089"
 CATEGORY_COLORS = dict(
     Data=BLUE, Programming="#C89A38", Business="#DB794B", Design="#8C9651", Language="#C47799"
 )
-METHOD_LABELS = dict(bank_transfer="Chuyển khoản", card="Thẻ thanh toán", wallet="Ví điện tử")
+METHOD_LABELS = dict(bank_transfer="Bank transfer", card="Card", wallet="Wallet")
 
 
 def tick_indices(length):
-    if length <= 1:
+    if length == 0:
+        return []
+    if length == 1:
         return [0]
     count = min(length, 4)
     return [round(index * (length - 1) / (count - 1)) for index in range(count)]
@@ -21,12 +24,12 @@ def tick_indices(length):
 
 def short_number(value, digits=1):
     number = float(value)
-    for divisor, suffix in [(1e9, "tỷ"), (1e6, "triệu"), (1e3, "nghìn")]:
+    if not math.isfinite(number):
+        return "—"
+    for divisor, suffix in [(1e9, "B"), (1e6, "M"), (1e3, "K")]:
         if abs(number) >= divisor:
-            return (
-                f"{number / divisor:,.{digits}f}".replace(",", " ").replace(".", ",") + " " + suffix
-            )
-    return f"{number:,.0f}".replace(",", ".")
+            return f"{number / divisor:,.{digits}f}" + " " + suffix
+    return f"{number:,.0f}"
 
 
 def base(height=300):
@@ -48,23 +51,26 @@ def base(height=300):
     return figure
 
 
-def revenue_chart(frame, grain="Tháng"):
+def revenue_chart(frame, grain="Month"):
+    if frame.empty:
+        return base(310)
     rows = frame.copy()
     rows["month"] = pd.to_datetime(rows["month"])
-    if grain == "Quý":
+    rows = rows.sort_values("month").reset_index(drop=True)
+    if grain == "Quarter":
         rows["month"] = rows["month"].dt.to_period("Q").dt.start_time
         rows = rows.groupby("month", as_index=False)[["net_vnd", "gross_vnd"]].sum()
     figure = base(310)
     unit = 1e9 if rows.gross_vnd.max() >= 1e9 else 1e6
-    suffix = "tỷ ₫" if unit == 1e9 else "triệu ₫"
+    suffix = "B VND" if unit == 1e9 else "M VND"
     labels = (
-        rows.month.dt.strftime("T%m/%Y")
-        if grain == "Tháng"
+        rows.month.dt.strftime("%b %Y")
+        if grain == "Month"
         else rows.month.map(lambda d: f"Q{d.quarter}/{d.year}")
     )
     for column, name, color, dash in [
-        ("gross_vnd", "Giá trị gốc", "#A7B2CA", "dot"),
-        ("net_vnd", "Doanh thu ròng", BLUE, "solid"),
+        ("gross_vnd", "Original value", "#A7B2CA", "dot"),
+        ("net_vnd", "Net revenue", BLUE, "solid"),
     ]:
         figure.add_trace(
             go.Scatter(
@@ -76,7 +82,9 @@ def revenue_chart(frame, grain="Tháng"):
                 marker=dict(size=5, color=color),
                 fill="tozeroy" if column == "net_vnd" else None,
                 fillcolor="rgba(79,99,217,.065)" if column == "net_vnd" else None,
-                customdata=list(zip(labels, rows[column].map(lambda n: short_number(n, 2) + " ₫"))),
+                customdata=list(
+                    zip(labels, rows[column].map(lambda n: short_number(n, 2) + " VND"))
+                ),
                 hovertemplate="<b>%{customdata[0]}</b><br>"
                 + name
                 + ": %{customdata[1]}<extra></extra>",
@@ -93,6 +101,8 @@ def revenue_chart(frame, grain="Tháng"):
 
 
 def ranked_chart(frame, value, label, kind="money", height=None, color=BLUE):
+    if frame.empty:
+        return base(height or 255)
     rows = frame.copy()
     figure = base(height or max(255, len(rows) * 29 + 45))
     labels = rows[label].astype(str)
@@ -100,21 +110,24 @@ def ranked_chart(frame, value, label, kind="money", height=None, color=BLUE):
     if kind == "money":
         divisor = 1e9 if values.max() >= 1e9 else 1e6
         plotted = values / divisor
-        suffix = " tỷ ₫" if divisor == 1e9 else " triệu ₫"
-        text = [f"{n:.2f}".replace(".", ",") + suffix for n in plotted]
+        suffix = " B VND" if divisor == 1e9 else " M VND"
+        text = [f"{n:.2f}" + suffix for n in plotted]
+        lower = min(float(plotted.min()) * 1.25, 0)
         limit = max(float(plotted.max()) * 1.32, 0.01)
     elif kind == "percent":
-        plotted, suffix, limit = values, "%", 100
-        text = [f"{n:.1f}".replace(".", ",") + "%" for n in values]
+        plotted, suffix, lower, limit = values, "%", 0, 100
+        text = [f"{n:.1f}" + "%" for n in values]
     else:
         plotted, suffix = values, ""
+        lower = min(float(values.min()) * 1.25, 0)
         limit = max(float(values.max()) * 1.28, 1)
         text = [short_number(n) for n in values]
     short = labels.map(lambda name: name if len(name) <= 26 else name[:24] + "…")
+    positions = [str(index) for index in range(len(rows))]
     figure.add_trace(
         go.Bar(
             x=plotted,
-            y=short,
+            y=positions,
             orientation="h",
             marker=dict(color=color, line_width=0),
             text=text,
@@ -126,16 +139,26 @@ def ranked_chart(frame, value, label, kind="money", height=None, color=BLUE):
         )
     )
     figure.update_yaxes(
-        type="category", autorange="reversed", showgrid=False, tickfont=dict(color=INK, size=12)
+        type="category",
+        autorange="reversed",
+        showgrid=False,
+        tickfont=dict(color=INK, size=12),
+        tickmode="array",
+        tickvals=positions,
+        ticktext=short,
     )
     figure.update_xaxes(
-        range=[0, limit], showgrid=True, gridcolor="#EDF0F5", nticks=4, ticksuffix=suffix
+        range=[lower, limit], showgrid=True, gridcolor="#EDF0F5", nticks=4, ticksuffix=suffix
     )
-    figure.update_layout(showlegend=False, margin=dict(l=8, r=34, t=8, b=8))
+    figure.update_layout(
+        showlegend=False, margin=dict(l=8, r=72 if kind == "percent" else 34, t=8, b=8)
+    )
     return figure
 
 
 def enrollment_chart(frame):
+    if frame.empty:
+        return base(255)
     rows = frame.copy()
     rows["month"] = pd.to_datetime(rows["month"])
     figure = base(255)
@@ -143,17 +166,17 @@ def enrollment_chart(frame):
         go.Bar(
             x=rows.month,
             y=rows.enrollments,
-            name="Ghi danh",
+            name="Enrollments",
             marker_color=BLUE,
-            customdata=rows.month.dt.strftime("T%m/%Y"),
-            hovertemplate="<b>%{customdata}</b><br>Ghi danh: %{y:,.0f}<extra></extra>",
+            customdata=rows.month.dt.strftime("%b %Y"),
+            hovertemplate="<b>%{customdata}</b><br>Enrollments: %{y:,.0f}<extra></extra>",
         )
     )
     indices = tick_indices(len(rows))
     figure.update_xaxes(
         tickmode="array",
         tickvals=rows.month.iloc[indices],
-        ticktext=rows.month.iloc[indices].dt.strftime("T%m/%Y"),
+        ticktext=rows.month.iloc[indices].dt.strftime("%b %Y"),
     )
     figure.update_yaxes(rangemode="tozero", nticks=4)
     return figure
@@ -174,7 +197,7 @@ def payment_mix(frame):
                 line=dict(color="white", width=3),
             ),
             textinfo="none",
-            hovertemplate="<b>%{label}</b><br>%{value:,.0f} giao dịch · %{percent}<extra></extra>",
+            hovertemplate="<b>%{label}</b><br>%{value:,.0f} payments · %{percent}<extra></extra>",
         )
     )
     figure.update_layout(
@@ -184,7 +207,7 @@ def payment_mix(frame):
             dict(
                 text="<b>"
                 + short_number(frame.payments.sum())
-                + '</b><br><span style="font-size:11px;color:#7D899D">giao dịch</span>',
+                + '</b><br><span style="font-size:11px;color:#7D899D">payments</span>',
                 x=0.5,
                 y=0.52,
                 showarrow=False,
@@ -205,10 +228,10 @@ def revenue_bridge(frame):
     figure = base(280)
     figure.add_trace(
         go.Waterfall(
-            x=["Giá trị gốc", "Giảm giá", "Hoàn tiền", "Doanh thu ròng"],
+            x=["Original value", "Discounts", "Refunds", "Net revenue"],
             y=[gross / unit, -discount / unit, -refund / unit, 0],
             measure=["absolute", "relative", "relative", "total"],
-            text=[short_number(n, 2) + " ₫" for n in [gross, -discount, -refund, net]],
+            text=[short_number(n, 2) + " VND" for n in [gross, -discount, -refund, net]],
             textposition="outside",
             textfont=dict(color=INK, size=11),
             connector=dict(line=dict(color="#CBD3E1", width=1)),
@@ -219,7 +242,7 @@ def revenue_bridge(frame):
         )
     )
     figure.update_yaxes(
-        ticksuffix=" tỷ ₫" if unit == 1e9 else " triệu ₫", rangemode="tozero", nticks=4
+        ticksuffix=" B VND" if unit == 1e9 else " M VND", rangemode="tozero", nticks=4
     )
     figure.update_layout(showlegend=False)
     return figure
