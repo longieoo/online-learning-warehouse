@@ -3,10 +3,10 @@
   "verification_date_utc": "2026-11-15",
   "full_smoke_started_at": "2026-11-15T01:48:19.102383+00:00",
   "full_smoke_finished_at": "2026-11-15T01:51:56.452421+00:00",
-  "offline_checked_at": "2026-11-15T02:00:32.483276+00:00",
+  "offline_checked_at": "2026-11-15T02:14:47.171830+00:00",
   "focused_dashboard_unit_checked_at": "2026-11-15T01:50:21.044953+00:00",
-  "live_dashboard_checked_at": "2026-11-15T02:00:37.216564+00:00",
-  "post_smoke_ui_scope": "Final presentation-only adjustments were checked separately by the later 67-test offline gate (including all 14 dashboard units) and 15 live dashboard checks; the complete pipeline/recovery/benchmark workflow was not repeated after those UI adjustments.",
+  "live_dashboard_checked_at": "2026-11-15T02:14:58.539975+00:00",
+  "post_smoke_scope": "Final UI polish and artifact receipt permission fixes were checked separately by the later 69-test offline gate (including all 14 dashboard units) and 15 live dashboard checks; the complete pipeline/recovery/benchmark workflow was not repeated after those changes.",
   "project": "learning-dw-smoke-upgrade-final-20261115",
   "initial_source_rows": 69203,
   "initial_enrollments": 5000,
@@ -14,7 +14,7 @@
   "verification_seconds": 217.351,
   "verification_steps_passed": 12,
   "offline_tests": {
-    "tests": 67,
+    "tests": 69,
     "skipped": 0,
     "database_integration_excluded": 4
   },
@@ -45,7 +45,7 @@
   "post_regression_gold_rows": 69798,
   "latest_published_pipeline_run": "a824d729f8ca46408c99d8d4694ec267",
   "quality_pipeline_run": "ec4bff3af27143499d66e922df94d843",
-  "counting_note": "Suites overlap. Do not add 67 offline, 58 runner, and 14 focused dashboard counts.",
+  "counting_note": "Suites overlap. Do not add 69 offline, 58 runner, and 14 focused dashboard counts.",
   "limits": {
     "cpu_quota": "2",
     "PG_MEMORY_LIMIT": "2g",

@@ -1,12 +1,14 @@
 """Regression coverage for publication readiness, locks and unsafe reuse."""
 
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from etl.common import project_lock, require_success
+from etl.common import project_lock, require_success, save_json
 from etl.pipeline import gold_intact, peak_rss_mib, pipeline
 from tests.scenarios import scenario_guard
 
@@ -17,6 +19,35 @@ class PublicationReliabilityTests(unittest.TestCase):
         cursor = connection.cursor.return_value.__enter__.return_value
         cursor.fetchone.side_effect = rows
         return connection, cursor
+
+    def test_json_receipts_preserve_unicode_and_are_readable_after_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "nested" / "receipt.json"
+            with patch("etl.common.ARTIFACTS", root):
+                save_json("nested/receipt.json", {"status": "running"})
+                receipt = {"status": "success", "details": {"label": "Kiểm tra dữ liệu", "rows": 7}}
+                save_json("nested/receipt.json", receipt)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), receipt)
+            self.assertIn("Kiểm tra dữ liệu", path.read_text(encoding="utf-8"))
+            self.assertEqual(list(path.parent.iterdir()), [path])
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+
+    def test_failed_receipt_replacement_preserves_previous_and_removes_temporary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "nested" / "receipt.json"
+            with patch("etl.common.ARTIFACTS", root):
+                save_json("nested/receipt.json", {"status": "success", "run_id": "previous"})
+                previous = path.read_bytes()
+                with (
+                    patch("etl.common.os.replace", side_effect=OSError("replace failed")),
+                    self.assertRaisesRegex(OSError, "replace failed"),
+                ):
+                    save_json("nested/receipt.json", {"status": "running", "run_id": "new"})
+            self.assertEqual(path.read_bytes(), previous)
+            self.assertEqual(list(path.parent.iterdir()), [path])
 
     def test_same_cardinality_content_changes_invalidate_gold_reuse(self):
         previous = {

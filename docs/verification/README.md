@@ -8,7 +8,7 @@ The local Docker verifier started with new volumes, 5,000 synthetic enrollments 
 
 | Evidence | Fresh result | Scope |
 |---|---|---|
-| [Offline checks](upgrade/offline-checks.json) | 67 tests, zero skips or failures | Dashboard image with networking disabled; four database integration tests explicitly excluded |
+| [Offline checks](upgrade/offline-checks.json) | 69 tests, zero skips or failures | Dashboard image with networking disabled; four database integration tests explicitly excluded |
 | [Runner unit/integration checks](upgrade/runner-checks.json) | 58 reported, 57 executed, one expected module skip; zero failures/errors | Includes the four database integration tests; runner image does not install Streamlit |
 | [Strict focused dashboard units](upgrade/dashboard-unit-checks.json) | 14 tests, zero skips or failures | Runs in the dashboard image; rejects a skipped module as a failed gate |
 | [Failure and recovery checks](upgrade/regression.json) | 23 checks passed | Deliberate mutations in the isolated synthetic database |
@@ -17,9 +17,9 @@ The local Docker verifier started with new volumes, 5,000 synthetic enrollments 
 | [Report export summary](upgrade/reports.json) | 10 CSV reports exported | Initial published snapshot, before failure scenarios modify the source |
 | [Benchmark metadata](upgrade/benchmark/metadata.json) | 11 full-row table hashes and seven query outputs matched | Small fixture, two warm-ups and three measured runs per engine/query |
 
-These counts overlap. The 14 focused dashboard tests are also part of the 67 offline tests. Do not add the offline, runner and dashboard counts to produce a combined test total. The single runner skip is explicit and is covered by the separate strict dashboard step.
+These counts overlap. The 14 focused dashboard tests are also part of the 69 offline tests. Do not add the offline, runner and dashboard counts to produce a combined test total. The single runner skip is explicit and is covered by the separate strict dashboard step.
 
-The full smoke completed at **01:51:56 UTC**. Final UI-only adjustments were verified afterward by the 67-test strict offline gate at approximately **02:00 UTC** and the 15 live dashboard checks at **02:00:37 UTC**. The later offline gate includes all 14 dashboard unit tests. The full pipeline, recovery and benchmark workflow was not repeated after those presentation adjustments; its receipts keep their original timestamps.
+The full smoke completed at **01:51:56 UTC**. Final UI polish and artifact receipt permission fixes were verified afterward by the 69-test strict offline gate at **02:14:47 UTC** and the 15 live dashboard checks at **02:14:58 UTC**. The later offline gate includes all 14 dashboard unit tests. The full pipeline, recovery and benchmark workflow was not repeated after those changes; its receipts keep their original timestamps.
 
 A separate manual browser review covered all six pages, empty category selection, Reset, the desktop layout and a 390-pixel mobile viewport with no document-level horizontal overflow. A Streamlit session-state warning was corrected during this review. This is a manual usability observation, not a load test or an automated screenshot-diff gate.
 

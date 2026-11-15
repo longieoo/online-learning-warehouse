@@ -28,6 +28,9 @@ def save_json(name, data):
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             json.dump(data, output, indent=2, ensure_ascii=False, default=str)
             output.flush()
+            # Container-written evidence must remain readable by the host runner.
+            if os.name == "posix":
+                os.fchmod(output.fileno(), 0o644)
             os.fsync(output.fileno())
         os.replace(temp_name, path)
     finally:
